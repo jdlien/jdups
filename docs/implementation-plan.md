@@ -1116,6 +1116,49 @@ It publishes a read-only heartbeat the tray displays, so "is the agent alive and
 armed" is visible at a glance. Disarming PowerChute without that recreates
 exactly the silent-failure risk the whole project is trying to avoid.
 
+### Can PowerChute be replaced outright?
+
+Asked properly, and answered from this device's own report descriptor rather
+than from assumption. **Yes, with one genuine unknown and one feature that is
+simply not written.**
+
+Every writable report named below was confirmed present in a `--probe` walk.
+
+| PowerChute does | jdups | What parity needs |
+|---|---|---|
+| Graceful shutdown on low battery | decides, inert | the transaction |
+| Cut UPS output after shutdown | — | `DelayBeforeShutdown` `0084:57`, reports 21 and 66, `-1..32767` |
+| Restart when mains returns | — | **the unknown, below** |
+| Configurable thresholds | `jdups.conf` | done, and range-validated |
+| Scheduled self-test | reads results | `Test` `0084:58`, report 33, `0..6` |
+| Event log | CSV + prose log | done, and richer than the vendor's |
+| Run a script before shutting down | — | small, and worth having |
+| Email on event | — | genuinely new work |
+| Web UI on `localhost:6547` | tray + CLI | deliberately not. This is the point |
+| Sleep / hibernate / Fast Startup | — | the service |
+| Audible alarm control | — | `AudibleAlarmControl` `0084:5A`, reports 24 and 120, `1..3` |
+| Transfer voltage, sensitivity | reads them | `0084:53` / `0084:54`, reports 50 and 51 |
+| Battery replacement warning | shows the install date | `NeedReplacement` `0085:48` is **not in the caps at all**, so PowerChute cannot be reading it either — it is computing from the date, and so can this |
+
+**The unknown is the restart handshake, and only that.** `DelayBeforeStartup`
+(`0084:56`) does not exist on this device; neither does `DelayBeforeReboot`
+(`0084:55`). What does exist is report 65, `FF86:7D`, an APC-vendor value whose
+logical range is `-1..32767` — *identical* to `DelayBeforeShutdown`, which is the
+shape a delay-in-seconds-with-cancel takes. Report 64, `FF86:7C`, is a companion
+boolean. That is suggestive and it is not a finding.
+
+It also may not matter as much as it looks. Cutting output is
+`DelayBeforeShutdown`, which is present and unambiguous; a Back-UPS restores
+output by itself when utility power returns. So the likely worst case is not "the
+machine never comes back", it is "we cannot configure how long it waits first".
+Both possibilities have to be demonstrated on a sacrificial load before either is
+believed.
+
+**What actually keeps PowerChute installed is not a feature.** It is that it has
+been running for years and is known to work. Feature parity is the easy half;
+the hard half is earning the same confidence, which is what the testing ladder
+below is for.
+
 ### PowerChute handover
 
 The draft contradicted itself: it kept PowerChute armed through live shutdown
