@@ -35,7 +35,7 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows_sys::Win32::UI::Shell::{
-    Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE,
+    ShellExecuteW, Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE,
     NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW,
     NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
 };
@@ -54,7 +54,8 @@ const ID_LOAD: u32 = 2;
 const ID_INPUT: u32 = 3;
 const ID_BATTERY: u32 = 4;
 const ID_INSTALLED: u32 = 5;
-const ID_EXIT: u32 = 6;
+const ID_OPEN_LOG: u32 = 6;
+const ID_EXIT: u32 = 7;
 
 const CF_UNICODETEXT: u32 = 13;
 
@@ -447,6 +448,13 @@ unsafe fn show_menu(app: *mut App, x: i32, y: i32) {
         );
 
         AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
+        // Only when there is one. An "Open log" that reports there is no log is
+        // furniture; the sampler is a separate install, and its absence is not
+        // an error the tray should keep announcing.
+        if jdups::logfile::newest_log().is_some() {
+            add_item(menu, ID_OPEN_LOG, "Open log", true);
+            AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
+        }
         add_item(menu, ID_EXIT, "Exit", true);
     }
 
@@ -478,6 +486,11 @@ unsafe fn on_command(app: *mut App, id: u32, snap: &Snapshot) {
         ID_EXIT => {
             unsafe { PostMessageW((*app).hwnd, WM_CLOSE, 0, 0) };
         }
+        ID_OPEN_LOG => {
+            if let Some(p) = jdups::logfile::newest_log() {
+                unsafe { open_as_text(&p) };
+            }
+        }
         // ID_INSTALLED is here although its row is disabled and cannot send a
         // command: if that row ever earns its way back to enabled, copying is
         // what it should do.
@@ -486,6 +499,70 @@ unsafe fn on_command(app: *mut App, id: u32, snap: &Snapshot) {
         }
         _ => {}
     }
+}
+
+/// Open a file with whatever handles **`.txt`**, not whatever handles `.csv`.
+///
+/// The distinction matters. The log is `.csv` because that is what it is and
+/// because charting battery decay is the reason it exists — but the shell's
+/// `open` verb for `.csv` is Excel, which is a heavy way to glance at a file.
+/// "Open log" should do what a log implies.
+///
+/// So the `.txt` handler is resolved and handed the path. That is still *your*
+/// editor rather than a hardcoded one — the plan is explicit about not
+/// bundling or naming a viewer — it is simply asking the association system a
+/// more useful question. Falls back to the plain `open` verb if the lookup
+/// fails, which at worst restores the Excel behaviour.
+unsafe fn open_as_text(path: &std::path::Path) {
+    use windows_sys::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE, ASSOCSTR_EXECUTABLE};
+
+    let file = wide(&path.to_string_lossy());
+    let verb = wide("open");
+
+    let mut buf = [0u16; 512];
+    let mut len = buf.len() as u32;
+    let ok = unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_EXECUTABLE,
+            wide(".txt").as_ptr(),
+            verb.as_ptr(),
+            buf.as_mut_ptr(),
+            &mut len,
+        )
+    } == 0;
+
+    if ok {
+        // Quoted: the log lives under a path with spaces in it more often than
+        // not, and an unquoted argument would be split at the first one.
+        let args = wide(&format!("\"{}\"", path.display()));
+        let exe = buf.as_ptr();
+        let r = unsafe {
+            ShellExecuteW(
+                core::ptr::null_mut(),
+                verb.as_ptr(),
+                exe,
+                args.as_ptr(),
+                core::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecute returns <= 32 on failure.
+        if r as isize > 32 {
+            return;
+        }
+    }
+
+    unsafe {
+        ShellExecuteW(
+            core::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
 }
 
 /// The clipboard, in the order that actually works.

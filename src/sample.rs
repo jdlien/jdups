@@ -40,8 +40,14 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     // Intervals are driven off a monotonic clock. Wall time is used only for
     // the timestamp column and the monthly filename, so a clock adjustment
     // cannot produce a negative-length window or a burst of rows.
+    // Sweep often enough that every window gets several. At the default
+    // 300 s interval this is just SWEEP_EVERY, but a short interval -- which is
+    // how anyone will first try this -- would otherwise emit rows with the
+    // feature-only columns blank, because no sweep happened to fall inside them.
+    let sweep_every = SWEEP_EVERY.min(opts.interval / 4).max(Duration::from_secs(1));
+
     let mut window_start = Instant::now();
-    let mut last_sweep = Instant::now() - SWEEP_EVERY;
+    let mut last_sweep = Instant::now() - sweep_every;
 
     let mut last_status: Option<PresentStatus> = None;
     let mut device_ok = false;
@@ -128,7 +134,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
 
         // --- the feature-only fields ---------------------------------------
-        if last_sweep.elapsed() >= SWEEP_EVERY {
+        if last_sweep.elapsed() >= sweep_every {
             sweep(dev, &mut acc);
             last_sweep = Instant::now();
         }

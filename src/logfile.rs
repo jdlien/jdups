@@ -253,6 +253,69 @@ pub fn default_dir() -> PathBuf {
         .join("jdups")
 }
 
+/// Everywhere the sampler might be writing.
+///
+/// The tray has no way to know which install shape is in use — machine-wide
+/// puts the log in `%ProgramData%`, `-PerUser` in `%LOCALAPPDATA%` — so it
+/// looks in both rather than guessing, and lets the newest file win.
+pub fn candidate_dirs() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(p) = std::env::var_os("ProgramData") {
+        v.push(PathBuf::from(p).join("jdups"));
+    }
+    if let Some(p) = std::env::var_os("LOCALAPPDATA") {
+        v.push(PathBuf::from(p).join("jdups"));
+    }
+    v
+}
+
+/// `jdups-YYYY-MM.csv`, and nothing else.
+///
+/// Deliberately strict. "Open log" handing the shell some unrelated file that
+/// happened to be sitting in the directory would be a small betrayal.
+pub fn is_log_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("jdups-") else {
+        return false;
+    };
+    let Some(stem) = rest.strip_suffix(".csv") else {
+        return false;
+    };
+    let (y, m) = match stem.split_once('-') {
+        Some(p) => p,
+        None => return false,
+    };
+    y.len() == 4
+        && m.len() == 2
+        && y.bytes().all(|b| b.is_ascii_digit())
+        && m.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The most recently written log, across every candidate directory.
+///
+/// By modification time rather than by name: if both install shapes have been
+/// used at some point, the one still being appended to is the one you want,
+/// which is not necessarily the one with the latest month in its name.
+pub fn newest_log() -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for dir in candidate_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            if !is_log_name(&e.file_name().to_string_lossy()) {
+                continue;
+            }
+            let Ok(t) = e.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
+                best = Some((t, e.path()));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 /// Local time now, with the offset the OS says is in effect.
 pub fn now_local() -> LocalTime {
     use windows_sys::Win32::Foundation::SYSTEMTIME;
@@ -318,6 +381,27 @@ mod tests {
         assert_eq!(t(-360).iso8601(), "2026-07-31T15:04:22-06:00");
         assert_eq!(t(0).iso8601(), "2026-07-31T15:04:22+00:00");
         assert_eq!(t(330).iso8601(), "2026-07-31T15:04:22+05:30");
+    }
+
+    #[test]
+    fn only_real_log_names_are_recognised() {
+        assert!(is_log_name("jdups-2026-08.csv"));
+        assert!(is_log_name("jdups-1999-12.csv"));
+        // What the month file actually produces must always pass.
+        assert!(is_log_name(&t(0).month_file()));
+
+        for bad in [
+            "jdups.csv",
+            "jdups-2026.csv",
+            "jdups-2026-8.csv",
+            "jdups-2026-08.txt",
+            "jdups-20xx-08.csv",
+            "notes.csv",
+            "jdups-2026-08.csv.bak",
+            "",
+        ] {
+            assert!(!is_log_name(bad), "accepted {bad:?}");
+        }
     }
 
     #[test]

@@ -23,6 +23,7 @@ USAGE:
     --watch [SECS]   Stream decoded input reports (default: until Ctrl-C)
     --probe          Dump the report descriptor: every value and button cap
     --list           List every HID collection present, and which one we'd pick
+    --log            Print the path of the log the tray would open
     --serial SERIAL  Select a specific unit when more than one is attached
 
     --sample         Log to CSV continuously. This is the headless logger the
@@ -59,6 +60,7 @@ fn main() {
             }
             "--probe" => mode = "probe",
             "--list" => mode = "list",
+            "--log" => mode = "log",
             "--watch" => {
                 mode = "watch";
                 if let Some(next) = args.get(i + 1) {
@@ -86,6 +88,20 @@ fn main() {
     }
 
     let code = match mode {
+        "log" => match jdups::logfile::newest_log() {
+            Some(p) => {
+                println!("{}", p.display());
+                0
+            }
+            None => {
+                eprintln!("jdups: no log found. Looked in:");
+                for d in jdups::logfile::candidate_dirs() {
+                    eprintln!("  {}", d.display());
+                }
+                eprintln!("       (the sampler writes it; see install.ps1)");
+                1
+            }
+        },
         "list" => cmd_list(),
         "sample" => cmd_sample(serial, interval, dir, verbose),
         _ => run(mode, serial.as_deref(), watch_secs),

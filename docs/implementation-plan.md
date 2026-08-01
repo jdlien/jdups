@@ -717,6 +717,25 @@ reason as jdrgb. **Open log** hands the current month's file to `ShellExecuteW`.
 present — detected by service presence, not by probing the port, which would cost
 a timeout on every menu open.
 
+### Opening the log
+
+"Open log" appears only when a log exists. The tray cannot know which install
+shape is in use, so it looks in both `%ProgramData%\jdups` and
+`%LOCALAPPDATA%\jdups` and takes the most recently *modified* file — not the
+latest month by name, since if both shapes have been used the one still being
+appended to is the one you want.
+
+It opens with the **`.txt`** handler, not the `.csv` one. The log is `.csv`
+because that is what it is and because charting decay is why it exists, but the
+shell's `open` verb for `.csv` is Excel, which is a heavy way to glance at a
+file. Resolving the `.txt` association via `AssocQueryStringW` still respects
+*your* editor rather than hardcoding one — the plan is explicit about not
+bundling or naming a viewer — it just asks the association system a more useful
+question. Measured on this machine: `.txt` resolves to Sublime Text, `.csv` to
+Excel. Falls back to the plain `open` verb if the lookup fails.
+
+`jdups --log` prints the path the tray would open, or lists where it looked.
+
 ## Phase 5 — transitions and notifications
 
 The device thread already holds the stream. This phase is what it does with it.
