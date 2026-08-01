@@ -1,0 +1,347 @@
+watching for 240s (Ctrl-C to stop)
+
+   0.01s  [sweep]              battery 24.67 V  input 0 V  load 24%  last transfer 8
+   0.12s  [0C 4E 3E 06 00]  charge/runtime  78%  1598s (27 min)
+   1.11s  [0C 4E 95 07 00]  charge/runtime  78%  1941s (32 min)
+   2.13s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+   3.61s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+   3.93s  [06 00 01 10 00]  charge state    charging=false discharging=true
+   3.96s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+   3.99s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+   5.02s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+   5.21s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+   7.24s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+   8.22s  [06 00 01 10 00]  charge state    charging=false discharging=true
+   8.25s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+   8.28s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+   9.30s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  11.31s  [sweep]              battery 24.50 V  input 0 V  load 17%  last transfer 8
+  11.77s  [0C 4E 67 08 00]  charge/runtime  78%  2151s (36 min)
+  12.47s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  12.51s  [0C 4E 67 08 00]  charge/runtime  78%  2151s (36 min)
+  12.54s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  13.55s  [sweep]              battery 24.50 V  input 0 V  load 19%  last transfer 8
+  13.69s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  15.10s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+  15.51s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  16.55s  [sweep]              battery 24.84 V  input 0 V  load 19%  last transfer 8
+  16.73s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  16.76s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  16.79s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  17.63s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+  18.04s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  19.06s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  19.64s  [0C 4E 67 08 00]  charge/runtime  78%  2151s (36 min)
+  20.99s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  21.02s  [0C 4E 67 08 00]  charge/runtime  78%  2151s (36 min)
+  21.05s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  21.06s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+  21.50s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  22.97s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+  23.13s  [0C 4E AF 07 00]  charge/runtime  78%  1967s (33 min)
+  23.14s  [sweep]              battery 24.67 V  input 0 V  load 21%  last transfer 8
+  23.48s  [0C 4E 95 07 00]  charge/runtime  78%  1941s (32 min)
+  25.27s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  25.29s  [sweep]              battery 24.67 V  input 0 V  load 19%  last transfer 8
+  25.31s  [0C 4E 95 07 00]  charge/runtime  78%  1941s (32 min)
+  25.34s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  27.37s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  27.42s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+  29.45s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  29.53s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  29.56s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+  29.59s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  30.30s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  32.33s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  33.79s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  33.82s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  33.85s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  34.87s  [sweep]              battery 24.84 V  input 0 V  load 19%  last transfer 8
+  36.12s  [0C 4E 00 08 00]  charge/runtime  78%  2048s (34 min)
+  36.41s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+  37.44s  [sweep]              battery 24.67 V  input 0 V  load 19%  last transfer 8
+  38.04s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  38.07s  [0C 4E D7 07 00]  charge/runtime  78%  2007s (33 min)
+  38.11s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  40.03s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  40.04s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+  42.06s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  42.33s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  42.36s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  42.39s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  44.43s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  46.46s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+  46.59s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  46.62s  [0C 4E 1E 08 00]  charge/runtime  78%  2078s (35 min)
+  46.65s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  46.68s  [0C 4E 03 08 00]  charge/runtime  78%  2051s (34 min)
+  48.72s  [sweep]              battery 24.84 V  input 0 V  load 20%  last transfer 8
+  49.08s  [0C 4E BE 07 00]  charge/runtime  78%  1982s (33 min)
+  49.47s  [0C 4E 03 08 00]  charge/runtime  78%  2051s (34 min)
+  50.84s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  50.85s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+  50.87s  [0C 4E 03 08 00]  charge/runtime  78%  2051s (34 min)
+  50.91s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  51.29s  [0C 4E 4C 08 00]  charge/runtime  78%  2124s (35 min)
+  53.31s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+  55.10s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  55.13s  [0C 4E 4C 08 00]  charge/runtime  78%  2124s (35 min)
+  55.16s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  56.19s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+  58.21s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  59.39s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  59.42s  [0C 4E 4C 08 00]  charge/runtime  78%  2124s (35 min)
+  59.45s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  60.47s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  62.49s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+  63.64s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  63.67s  [0C 4E 4C 08 00]  charge/runtime  78%  2124s (35 min)
+  63.71s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  64.75s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+  66.78s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  67.90s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  67.93s  [0C 4E 4C 08 00]  charge/runtime  78%  2124s (35 min)
+  67.96s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  68.25s  [0C 4E 9C 08 00]  charge/runtime  78%  2204s (37 min)
+  69.28s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  71.29s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  72.15s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  72.19s  [0C 4E 9C 08 00]  charge/runtime  78%  2204s (37 min)
+  72.22s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  74.24s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  76.27s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  76.41s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  76.44s  [0C 4E 9C 08 00]  charge/runtime  78%  2204s (37 min)
+  76.47s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  78.49s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  80.55s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  80.70s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  80.73s  [0C 4E 9C 08 00]  charge/runtime  78%  2204s (37 min)
+  80.76s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  82.78s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+  84.80s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+  84.95s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  84.99s  [0C 4E 9C 08 00]  charge/runtime  78%  2204s (37 min)
+  85.02s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  87.05s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  89.07s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  89.21s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  89.24s  [0C 4E 9C 08 00]  charge/runtime  78%  2204s (37 min)
+  89.27s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  91.33s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  93.36s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+  93.47s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  93.50s  [0C 4E 9C 08 00]  charge/runtime  78%  2204s (37 min)
+  93.53s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  95.03s  [0C 4E 4C 08 00]  charge/runtime  78%  2124s (35 min)
+  96.05s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+  97.75s  [06 00 01 10 00]  charge state    charging=false discharging=true
+  97.79s  [0C 4E 4C 08 00]  charge/runtime  78%  2124s (35 min)
+  97.82s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+  98.84s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 100.57s  [0C 4E 31 08 00]  charge/runtime  78%  2097s (35 min)
+ 101.56s  [0C 4E 7F 08 00]  charge/runtime  78%  2175s (36 min)
+ 101.57s  [sweep]              battery 25.01 V  input 0 V  load 17%  last transfer 8
+ 102.01s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 102.04s  [0C 4E 7F 08 00]  charge/runtime  78%  2175s (36 min)
+ 102.07s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 104.10s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 106.12s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 106.27s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 106.30s  [0C 4E 7F 08 00]  charge/runtime  78%  2175s (36 min)
+ 106.33s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 108.35s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 110.38s  [sweep]              battery 24.84 V  input 0 V  load 16%  last transfer 8
+ 110.52s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 110.55s  [0C 4E 7F 08 00]  charge/runtime  78%  2175s (36 min)
+ 110.59s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 112.63s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 114.65s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 114.81s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 114.84s  [0C 4E 7F 08 00]  charge/runtime  78%  2175s (36 min)
+ 114.87s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 116.90s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 118.93s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 119.07s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 119.10s  [0C 4E 7F 08 00]  charge/runtime  78%  2175s (36 min)
+ 119.13s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 121.15s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 123.17s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 123.32s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 123.35s  [0C 4E 7F 08 00]  charge/runtime  78%  2175s (36 min)
+ 123.39s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 125.40s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 127.43s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 127.48s  [0C 4E 64 08 00]  charge/runtime  78%  2148s (36 min)
+ 127.58s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 127.61s  [0C 4D 64 08 00]  charge/runtime  77%  2148s (36 min)
+ 127.64s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 129.66s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 131.68s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 131.87s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 131.90s  [0C 4D 64 08 00]  charge/runtime  77%  2148s (36 min)
+ 131.93s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 133.99s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 136.00s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 136.12s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 136.15s  [0C 4D 64 08 00]  charge/runtime  77%  2148s (36 min)
+ 136.19s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 138.21s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 140.24s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 140.38s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 140.41s  [0C 4D 64 08 00]  charge/runtime  77%  2148s (36 min)
+ 140.44s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 142.47s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 144.51s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 144.63s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 144.67s  [0C 4D 64 08 00]  charge/runtime  77%  2148s (36 min)
+ 144.70s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 146.36s  [0C 4D 18 08 00]  charge/runtime  77%  2072s (35 min)
+ 147.38s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 148.92s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 148.95s  [0C 4D 18 08 00]  charge/runtime  77%  2072s (35 min)
+ 148.99s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 149.53s  [0C 4D 64 08 00]  charge/runtime  77%  2148s (36 min)
+ 149.57s  [sweep]              battery 24.84 V  input 0 V  load 17%  last transfer 8
+ 151.59s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 153.18s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 153.21s  [0C 4D 64 08 00]  charge/runtime  77%  2148s (36 min)
+ 153.24s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 154.26s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 154.33s  [0C 4D 18 08 00]  charge/runtime  77%  2072s (35 min)
+ 156.34s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 157.43s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 157.47s  [0C 4D 18 08 00]  charge/runtime  77%  2072s (35 min)
+ 157.50s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 158.52s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 160.54s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 161.69s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 161.72s  [0C 4D 18 08 00]  charge/runtime  77%  2072s (35 min)
+ 161.75s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 162.77s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 164.79s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 165.98s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 166.01s  [0C 4D 18 08 00]  charge/runtime  77%  2072s (35 min)
+ 166.04s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 167.06s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 168.19s  [0C 4D D0 07 00]  charge/runtime  77%  2000s (33 min)
+ 169.21s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 170.23s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 170.27s  [0C 4D D0 07 00]  charge/runtime  77%  2000s (33 min)
+ 170.30s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 171.31s  [sweep]              battery 24.67 V  input 0 V  load 17%  last transfer 8
+ 173.35s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 174.49s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 174.52s  [0C 4D D0 07 00]  charge/runtime  77%  2000s (33 min)
+ 174.55s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 175.57s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 177.60s  [sweep]              battery 24.67 V  input 0 V  load 19%  last transfer 8
+ 178.75s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 178.78s  [0C 4D D0 07 00]  charge/runtime  77%  2000s (33 min)
+ 178.81s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 179.83s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 181.85s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 182.20s  [0C 4D 18 08 00]  charge/runtime  77%  2072s (35 min)
+ 182.33s  [0C 4D FD 07 00]  charge/runtime  77%  2045s (34 min)
+ 182.49s  [0C 4C FD 07 00]  charge/runtime  76%  2045s (34 min)
+ 183.03s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 183.07s  [0C 4C FD 07 00]  charge/runtime  76%  2045s (34 min)
+ 183.10s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 184.12s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 186.14s  [sweep]              battery 24.84 V  input 0 V  load 19%  last transfer 8
+ 187.29s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 187.32s  [0C 4C FD 07 00]  charge/runtime  76%  2045s (34 min)
+ 187.35s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 188.37s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 188.86s  [0C 4C B5 07 00]  charge/runtime  76%  1973s (33 min)
+ 190.88s  [sweep]              battery 24.67 V  input 0 V  load 19%  last transfer 8
+ 191.55s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 191.58s  [0C 4C B5 07 00]  charge/runtime  76%  1973s (33 min)
+ 191.61s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 193.63s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 195.66s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 195.80s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 195.83s  [0C 4C B5 07 00]  charge/runtime  76%  1973s (33 min)
+ 195.87s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 197.66s  [0C 4C 73 07 00]  charge/runtime  76%  1907s (32 min)
+ 197.67s  [sweep]              battery 24.67 V  input 0 V  load 20%  last transfer 8
+ 199.70s  [sweep]              battery 24.67 V  input 0 V  load 19%  last transfer 8
+ 200.09s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 200.12s  [0C 4C 73 07 00]  charge/runtime  76%  1907s (32 min)
+ 200.15s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 200.99s  [0C 4C B5 07 00]  charge/runtime  76%  1973s (33 min)
+ 202.00s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 204.02s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 204.35s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 204.38s  [0C 4C B5 07 00]  charge/runtime  76%  1973s (33 min)
+ 204.41s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 206.45s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 208.47s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 208.60s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 208.63s  [0C 4C B5 07 00]  charge/runtime  76%  1973s (33 min)
+ 208.67s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 210.69s  [sweep]              battery 24.67 V  input 0 V  load 18%  last transfer 8
+ 211.51s  [0C 4C FD 07 00]  charge/runtime  76%  2045s (34 min)
+ 212.86s  [06 00 01 10 00]  charge state    charging=false discharging=true
+ 212.87s  [sweep]              battery 24.84 V  input 0 V  load 18%  last transfer 8
+ 212.89s  [0C 4C FD 07 00]  charge/runtime  76%  2045s (34 min)
+ 212.92s  [16 0A 00 00 00]  PresentStatus   BatteryPresent, Discharging
+ 214.14s  [0C 4C DB 07 00]  charge/runtime  76%  2011s (34 min)
+ 214.30s  [0C 4C B5 07 00]  charge/runtime  76%  1973s (33 min)
+ 215.31s  [sweep]              battery 24.84 V  input 119 V  load 18%  last transfer 8
+ 215.64s  [13 01 B5 07 00]  ACPresent       true
+ 215.67s  [06 01 00 08 00]  charge state    charging=true discharging=false
+ 215.71s  [0C 4B 9B 07 00]  charge/runtime  75%  1947s (32 min)
+ 215.74s  [16 0D 00 00 00]  PresentStatus   ACPresent, BatteryPresent, Charging
+ 217.77s  [sweep]              battery 25.70 V  input 118 V  load 18%  last transfer 8
+ 219.79s  [sweep]              battery 25.70 V  input 118 V  load 18%  last transfer 8
+ 219.90s  [06 01 00 08 00]  charge state    charging=true discharging=false
+ 219.93s  [0C 4B 9B 07 00]  charge/runtime  75%  1947s (32 min)
+ 219.96s  [16 0D 00 00 00]  PresentStatus   ACPresent, BatteryPresent, Charging
+ 222.00s  [sweep]              battery 25.70 V  input 118 V  load 20%  last transfer 8
+ 222.33s  [0C 4B 59 07 00]  charge/runtime  75%  1881s (31 min)
+ 222.62s  [0C 4B 9B 07 00]  charge/runtime  75%  1947s (32 min)
+ 224.19s  [06 01 00 08 00]  charge state    charging=true discharging=false
+ 224.20s  [sweep]              battery 25.88 V  input 118 V  load 18%  last transfer 8
+ 224.22s  [0C 4B 9B 07 00]  charge/runtime  75%  1947s (32 min)
+ 224.25s  [16 0D 00 00 00]  PresentStatus   ACPresent, BatteryPresent, Charging
+ 225.21s  [0C 4B 59 07 00]  charge/runtime  75%  1881s (31 min)
+ 225.47s  [0C 4B 1C 07 00]  charge/runtime  75%  1820s (30 min)
+ 225.72s  [0C 4B E1 06 00]  charge/runtime  75%  1761s (29 min)
+ 226.01s  [0C 4B AA 06 00]  charge/runtime  75%  1706s (28 min)
+ 226.30s  [0C 4B 75 06 00]  charge/runtime  75%  1653s (28 min)
+ 226.31s  [sweep]              battery 25.88 V  input 117 V  load 26%  last transfer 8
+ 226.62s  [0C 4B 44 06 00]  charge/runtime  75%  1604s (27 min)
+ 226.94s  [0C 4B 15 06 00]  charge/runtime  75%  1557s (26 min)
+ 227.48s  [0C 4B E8 05 00]  charge/runtime  75%  1512s (25 min)
+ 228.44s  [06 01 00 08 00]  charge state    charging=true discharging=false
+ 228.45s  [sweep]              battery 25.88 V  input 117 V  load 25%  last transfer 8
+ 228.47s  [0C 4B E8 05 00]  charge/runtime  75%  1512s (25 min)
+ 228.51s  [16 0D 00 00 00]  PresentStatus   ACPresent, BatteryPresent, Charging
+ 228.99s  [0C 4B BE 05 00]  charge/runtime  75%  1470s (25 min)
+ 229.18s  [0C 4B E8 05 00]  charge/runtime  75%  1512s (25 min)
+ 230.07s  [0C 4B 15 06 00]  charge/runtime  75%  1557s (26 min)
+ 230.59s  [0C 4B E8 05 00]  charge/runtime  75%  1512s (25 min)
+ 230.60s  [sweep]              battery 25.88 V  input 117 V  load 27%  last transfer 8
+ 231.03s  [0C 4B BE 05 00]  charge/runtime  75%  1470s (25 min)
+ 232.03s  [0C 4B 96 05 00]  charge/runtime  75%  1430s (24 min)
+ 232.70s  [06 01 00 08 00]  charge state    charging=true discharging=false
+ 232.71s  [sweep]              battery 26.05 V  input 117 V  load 24%  last transfer 8
+ 232.73s  [0C 4B 96 05 00]  charge/runtime  75%  1430s (24 min)
+ 232.76s  [16 0D 00 00 00]  PresentStatus   ACPresent, BatteryPresent, Charging
+ 234.65s  [0C 4B BE 05 00]  charge/runtime  75%  1470s (25 min)
+ 235.10s  [0C 4B E8 05 00]  charge/runtime  75%  1512s (25 min)
+ 235.11s  [sweep]              battery 26.05 V  input 117 V  load 21%  last transfer 8
+ 235.74s  [0C 4B 15 06 00]  charge/runtime  75%  1557s (26 min)
+ 236.25s  [0C 4B 44 06 00]  charge/runtime  75%  1604s (27 min)
+ 236.99s  [06 01 00 08 00]  charge state    charging=true discharging=false
+ 237.02s  [0C 4B 44 06 00]  charge/runtime  75%  1604s (27 min)
+ 237.05s  [16 0D 00 00 00]  PresentStatus   ACPresent, BatteryPresent, Charging
+ 237.66s  [0C 4B 75 06 00]  charge/runtime  75%  1653s (28 min)
+ 237.67s  [sweep]              battery 26.05 V  input 117 V  load 20%  last transfer 8
+ 237.88s  [0C 4B 44 06 00]  charge/runtime  75%  1604s (27 min)
+ 239.92s  [sweep]              battery 26.05 V  input 117 V  load 26%  last transfer 8
+ 239.96s  [0C 4B 15 06 00]  charge/runtime  75%  1557s (26 min)
+ 240.47s  [0C 4B E8 05 00]  charge/runtime  75%  1512s (25 min)
+
+235 reports in 240.5s

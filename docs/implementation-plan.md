@@ -393,7 +393,41 @@ Done. 31 unit tests, clippy clean, **179,712-byte** release binary.
 5. The `SP_DEVICE_INTERFACE_DETAIL_DATA_W` `cbSize`-is-8-not-the-buffer-size
    warning was correct and cost nothing, because it was written down first.
 
-## Phase 1.5 — the plug-pull, before anything depends on it
+## Phase 1.5 — the plug-pull — **done**
+
+Captured in `docs/plug-pull.txt`. Every question it existed to answer is
+answered, and the log schema is confirmed correct rather than merely plausible.
+
+**The voltage mapping holds.** Report 49 is mains and report 9 is the battery,
+which was only ever verified on mains where neither is doing anything
+interesting. On battery, report 49 read **0 V** and report 9 sagged from 27.26 V
+to **24.67 V**; on restoration report 49 jumped to 119 V and report 9 climbed
+back through 25.70 → 25.88 → 26.05 V as the charger engaged. So the log's
+`input_v` and `battery_v` columns are labelled right. This was the one real risk
+in having built Phase 6 ahead of this gate.
+
+**Report 19 pushes on change, exactly as the input caps implied** — it appeared
+precisely once in a four-minute capture, at the moment mains returned, among 122
+report-12s and 56 report-22s. On-change, not periodic, confirmed.
+
+**`FF86:52` reads 8** for a plug-pull, consistently across two separate events.
+One code, one cause; the rest of the 0–13 range still wants decoding against
+NUT, and only a different kind of fault will produce them.
+
+**The transfer sag lands entirely inside the first seconds.** The first sampled
+row after transfer already read 78 %, and over the following three minutes of
+genuine discharge the estimate fell only 78 → 76 % while runtime drifted
+*upward* relative to elapsed time — 2078 s down to 1973 s across 183 s of real
+time, i.e. the estimate correcting itself upward as the reading settled. That is
+direct support for the settle window in `policy.rs`: a threshold evaluated in
+the first thirty seconds is evaluated on the worst number the device will
+produce.
+
+**The event path works on real hardware.** The sampler wrote an `online` row
+carrying `transfer=8`, with `flags` moving `discharging` → `ac` across the
+transition. That code had never seen a real power event.
+
+## Phase 1.5 — original plan, kept for the record
 
 Ten minutes, and it settles the remaining unknowns before the log schema or the
 notification logic is fixed. `--watch` redirected to a file; pull the plug for
