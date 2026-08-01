@@ -70,6 +70,8 @@ an outage.
 
 ## Docs
 
+- **[docs/status.md](docs/status.md)** — where the work stands, what is proven,
+  what is unverified, and what is next. Start here.
 - **[docs/implementation-plan.md](docs/implementation-plan.md)** — what to build,
   in what order, how to know it works, and what each phase turned out to have
   wrong.
