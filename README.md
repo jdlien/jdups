@@ -3,8 +3,12 @@
 A small Windows tray readout for an APC Back-UPS RS 1500MS2: charge, runtime,
 load, voltages, at a click.
 
-Not started. **[docs/jdups-plan.md](docs/jdups-plan.md) is the plan** — read that
-first; it carries the verified HID report map and the reasoning.
+Not started. Two documents, in order:
+
+- **[docs/jdups-plan.md](docs/jdups-plan.md)** — the investigation record. The
+  hardware, the verified HID report map, and what the dead ends rule out.
+- **[docs/implementation-plan.md](docs/implementation-plan.md)** — what to build,
+  in what order, and how to know it works.
 
 ## Why
 
@@ -36,6 +40,11 @@ to a file — and it is more precise than PowerChute shows it (`11 / 2021`).
 
 ## Scope
 
-A readout, and a log it keeps itself. **Not** a shutdown agent — that is the one
-job PowerChute genuinely does, Windows has no built-in UPS service, and losing it
-unnoticed would only become apparent during an outage. See the plan's non-goals.
+A readout and a log it keeps itself, first. A graceful-shutdown agent second, as
+a **separate binary**, gated behind the readout being trusted — a readout that is
+wrong shows a stale number, and a shutdown agent that is wrong eats a filesystem.
+
+Until that agent exists and has been proven end to end, **PowerChute stays
+installed and armed**: it is the one job it genuinely does, Windows has no
+built-in UPS service, and losing it unnoticed would only become apparent during
+an outage.

@@ -68,6 +68,14 @@ payload. Values below are real readings taken during the investigation.
 Cross-check against the web UI at the same moment: 100 % charge, 27.2 VDC,
 118.0 VAC, 18–20 % load, 38–43 min. Everything agrees.
 
+> **This table is correct but incomplete.** A full value-*and-button* caps walk
+> found the report this one is missing entirely: **report 22, `PresentStatus`**,
+> eleven status flags — `ACPresent`, `Discharging`, `ShutdownImminent`,
+> `CommunicationLost` and more — in a single five-byte read, pushed on the input
+> stream. It is absent here because those are 1-bit *button* caps, and
+> `HidP_GetValueCaps` does not return them. See
+> [implementation-plan.md](implementation-plan.md) for the complete map.
+
 Report 12 is the one that matters most — it carries **both** charge and runtime
 in a single 5-byte read, which is the entire "what do I actually need to know"
 payload.
@@ -163,7 +171,9 @@ jdups.exe   (windows subsystem)
   the two-subsystem problem doesn't arise. If a console readout turns out to be
   wanted for scripting or debugging, `AttachConsole(ATTACH_PARENT_PROCESS)` lets
   the same windows-subsystem binary print to the calling shell — cheaper than a
-  second target.
+  second target. *(Superseded in part: still one binary for the tray, sampler and
+  console readout, but the shutdown agent is a second one — see the
+  implementation plan's Phase 8.)*
 - **No admin.** Nothing in the read path needs it.
 
 ### Reading
@@ -173,11 +183,17 @@ reports and completes in milliseconds, so there is no reason to cache and every
 reason not to — a cached readout goes stale the moment you look away.
 
 **Do not poll for events.** The device has a 5-byte *input* report, which means a
-blocking `ReadFile` on a `GENERIC_READ` handle wakes up exactly when the UPS
-state changes. A background thread parked on that read costs nothing while idle
-and gets you an instant "On Battery" notification, rather than discovering it up
-to N seconds late. This is the nicest thing available here and worth doing
-properly. Keep a slow timer (30–60 s) as a backstop only.
+blocking `ReadFile` on a `GENERIC_READ` handle costs nothing while idle and gets
+you an instant "On Battery" notification, rather than discovering it up to N
+seconds late. This is the nicest thing available here and worth doing properly.
+Keep a slow timer (30–60 s) as a backstop only.
+
+> **Corrected during implementation planning.** This paragraph used to claim the
+> read "wakes up exactly when the UPS state changes". It does not — the device
+> pushes reports continuously (~0.85/s while idle), multiplexed across report IDs
+> 12, 6 and 22. The no-polling conclusion survives; the reader must dispatch on
+> `buf[0]` and fire on *transitions* rather than arrivals. See
+> [implementation-plan.md](implementation-plan.md), "New findings".
 
 ### The icon
 
@@ -241,8 +257,15 @@ agent unnecessary.
 `C:\Windows\INF\oem50.inf` — provider "APC by Schneider Electric", **DriverVer
 11/03/2009** — is `Class=Battery` and claims `HID\VID_051D&PID_0000` through
 `0012`. Its install section registers **no service**: `DEVPKEY_Device_Service` on
-the devnode is empty. It is a null driver whose only function is to occupy the
-Battery devnode so the inbox HID battery driver cannot bind.
+the devnode is empty.
+
+The natural reading is that it is a null driver occupying the Battery devnode so
+the inbox HID battery driver cannot bind. **That is a hypothesis, not a
+finding** — the INF and the empty service key are consistent with it, but they
+do not establish APC's intent, that blocking the inbox driver is its *only*
+effect, or that rebinding would actually yield working Windows UPS shutdown.
+Option A below is how you would find out, and it should record the before/after
+driver stack, battery interface, power-policy behaviour and rollback procedure.
 
 That single fact explains all three dead ends recorded earlier — no
 `Win32_Battery` row, `GetSystemPowerStatus` reporting `BatteryFlag = 128`, and no
@@ -326,10 +349,13 @@ Firm ones, with reasons:
 2. **`0xFF86:0x52` last transfer reason** reads `0` with a clean power history.
    Its range is 0–13, and NUT's `apc-hid.c` is the reference for what the codes
    mean. Worth decoding for the log, but you need an actual transfer to verify.
-3. **Whether report 12's two fields are always coherent** — it packs charge and
-   runtime into one read, which is convenient but assumes the firmware updates
-   both atomically. Probably fine; worth not assuming in the log.
-4. **Icon direction** — generated gauge vs. static asset (see above).
+3. ~~**Whether report 12's two fields are always coherent**~~ — **answered.** Both
+   fields arrive in the same five bytes, on the input path and via
+   `HidD_GetFeature` alike, so there is no window in which they can disagree.
+   The separate question the capture *did* raise is that runtime jitters ±3.5 %
+   at a dead-steady load, which matters for the log.
+4. ~~**Icon direction**~~ — **decided:** generated gauge, with digits rendered
+   into it when the UPS is not resting full. See the implementation plan.
 
 ## Appendix: reproducing the investigation
 
