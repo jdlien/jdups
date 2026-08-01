@@ -1163,19 +1163,48 @@ setting is unlikely to be writing it, which is real evidence — the negative
 kind — that report 65 is not part of the handshake and the UPS restores output
 by itself when mains returns.
 
-**The unknown is the restart handshake, and only that.** `DelayBeforeStartup`
-(`0084:56`) does not exist on this device; neither does `DelayBeforeReboot`
-(`0084:55`). What does exist is report 65, `FF86:7D`, an APC-vendor value whose
-logical range is `-1..32767` — *identical* to `DelayBeforeShutdown`, which is the
-shape a delay-in-seconds-with-cancel takes. Report 64, `FF86:7C`, is a companion
-boolean. That is suggestive and it is not a finding.
+### The shutdown mechanism, measured — **settled 2026-08-01**
 
-It also may not matter as much as it looks. Cutting output is
-`DelayBeforeShutdown`, which is present and unambiguous; a Back-UPS restores
-output by itself when utility power returns. So the likely worst case is not "the
-machine never comes back", it is "we cannot configure how long it waits first".
-Both possibilities have to be demonstrated on a sacrificial load before either is
-believed.
+A real PowerChute shutdown was watched register by register, on this unit, with
+only the PC on the UPS. It answers the question the plan had been circling, and
+it answers it differently than the plan guessed.
+
+```
+12:49:31  ACT   shutdown(21)=none  flag(64)=1  restart(65)=119s
+12:49:34  ACT   shutdown(21)=none  flag(64)=1  restart(65)=116s
+12:49:36  ACT   shutdown(21)=none  flag(64)=1  restart(65)=114s
+                              ... counting down ...
+12:49:52  ACT   shutdown(21)=none  flag(64)=1  restart(65)=98s
+```
+
+1. **Report 65 (`FF86:7D`) is the shutdown countdown.** PowerChute set it to 120
+   — its "Time for operating system to shut down" — and the UPS decremented it in
+   real time, cutting output at zero. It is not a restart delay. The plan had it
+   labelled as one on the reasoning that its `-1..32767` range matched
+   `DelayBeforeShutdown`; that was the right observation and the wrong
+   conclusion. It matches because it *is* a shutdown delay, APC's own.
+2. **Report 64 (`FF86:7C`) is the armed flag**, 0 → 1 for the duration.
+3. **Report 21, the standard `DelayBeforeShutdown`, was never touched.** It read
+   -1 through the entire sequence. Every plan and every note that said to write
+   report 21 was wrong; write 65.
+4. **There is no restart handshake.** Mains returned, the UPS restored output by
+   itself, and both registers reset to 0 and -1 unaided. Nothing to write and
+   nothing to configure — which is why no such setting exists in PowerChute's UI.
+5. The machine itself did not power on, which is a BIOS "restore on AC power
+   loss" setting and not something any UPS software controls.
+
+**What is still unknown, and it is small:** whether report 64 is written or
+merely reflects an armed countdown. The first sample already had it set, so the
+order was never observed. Try writing 65 alone and see whether 64 follows.
+
+**The last real unknown in the project is therefore closed**, and the shutdown
+path is now a known sequence rather than a hypothesis.
+
+**The restart handshake was the last unknown and there turns out not to be one.**
+`DelayBeforeStartup` (`0084:56`) does not exist on this device and neither does
+`DelayBeforeReboot` (`0084:55`) — and nothing needs them. The UPS restores its
+own output when mains returns, observed directly. That is also why no such
+setting appears anywhere in PowerChute's UI.
 
 **What actually keeps PowerChute installed is not a feature.** It is that it has
 been running for years and is known to work. Feature parity is the easy half;

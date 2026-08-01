@@ -48,6 +48,15 @@ pub struct Tick<'a> {
     pub on_battery_for: Option<u64>,
     /// False once the agent has been told it may actually act.
     pub dry_run: bool,
+    /// The device has genuinely stopped answering, per the configured window.
+    ///
+    /// Not `!obs.fresh`. That flag means "no read landed on *this* pass", and
+    /// the loop runs several times per poll, so three passes in four are not
+    /// fresh even when the device is perfectly healthy. Using it here labelled
+    /// almost every heartbeat NOT FRESH during a real outage, which is worse
+    /// than useless: it trains the reader to ignore the word on the one
+    /// occasion it matters.
+    pub stale: bool,
 }
 
 #[derive(Debug, Default)]
@@ -84,7 +93,7 @@ impl Journal {
                         format!(
                             "{verb}: {} ({}, {} on battery)",
                             why.as_str(),
-                            numbers(t.obs),
+                            numbers(t.obs, t.stale),
                             duration(elapsed),
                         ),
                     ));
@@ -98,7 +107,7 @@ impl Journal {
                         Level::Warn,
                         format!(
                             "still past the trigger: {} ({} on battery)",
-                            numbers(t.obs),
+                            numbers(t.obs, t.stale),
                             duration(elapsed),
                         ),
                     ));
@@ -112,14 +121,14 @@ impl Journal {
                     self.last_beat_s = t.now_s;
                     return Some((
                         Level::Warn,
-                        format!("on battery: {}", numbers(t.obs)),
+                        format!("on battery: {}", numbers(t.obs, t.stale)),
                     ));
                 }
                 if due {
                     self.last_beat_s = t.now_s;
                     return Some((
                         Level::Warn,
-                        format!("on battery {}: {}", duration(elapsed), numbers(t.obs)),
+                        format!("on battery {}: {}", duration(elapsed), numbers(t.obs, t.stale)),
                     ));
                 }
                 None
@@ -130,7 +139,7 @@ impl Journal {
                 // Only interesting as a return. Mains staying up is not news,
                 // and this is the one state the machine spends its life in.
                 if changed && prev.is_some_and(|p| p != Action::Nothing) {
-                    return Some((Level::Info, format!("back on mains: {}", numbers(t.obs))));
+                    return Some((Level::Info, format!("back on mains: {}", numbers(t.obs, t.stale))));
                 }
                 None
             }
@@ -141,7 +150,7 @@ impl Journal {
 /// Charge and runtime, with the missing cases spelled out rather than skipped.
 ///
 /// A line that silently omits runtime looks like a line about a healthy device.
-fn numbers(o: &Observation) -> String {
+fn numbers(o: &Observation, stale: bool) -> String {
     let mut s = String::new();
     match o.charge {
         Some(c) => s.push_str(&format!("{c}%")),
@@ -151,8 +160,8 @@ fn numbers(o: &Observation) -> String {
         Some(r) => s.push_str(&format!(", {} left ({r} s)", duration(r as u64))),
         None => s.push_str(", runtime unknown"),
     }
-    if !o.fresh {
-        s.push_str(", NOT FRESH");
+    if stale {
+        s.push_str(", DEVICE NOT ANSWERING");
     }
     s
 }
@@ -196,6 +205,7 @@ mod tests {
                 obs: &o,
                 on_battery_for: on_batt.then_some(now_s),
                 dry_run: true,
+                stale: false,
             };
             if let Some(line) = j.note(&t) {
                 out.push(line);
@@ -292,18 +302,32 @@ mod tests {
         );
     }
 
-    /// A reading the agent could not refresh has to be labelled as such. The
+    /// A device that has genuinely stopped answering has to be labelled. The
     /// numbers still print, because a stale number is evidence; it is just not
     /// the same evidence as a current one.
     #[test]
-    fn a_stale_reading_is_marked() {
+    fn a_device_that_stopped_answering_is_marked() {
+        let o = obs(10, true, 50, 600);
+        let mut j = Journal::new();
+        let line = j
+            .note(&Tick { now_s: 10, action: Action::Warn, obs: &o, on_battery_for: Some(10), dry_run: true, stale: true })
+            .unwrap();
+        assert!(line.1.contains("DEVICE NOT ANSWERING"), "{line:?}");
+        assert!(line.1.contains("50%"), "{line:?}");
+    }
+
+    /// ...and a healthy one is not, however many individual passes happened to
+    /// carry no read. This is the regression: `Observation::fresh` is per-pass,
+    /// the loop runs several times per poll, and using it here put a warning on
+    /// nearly every heartbeat of a real outage.
+    #[test]
+    fn a_pass_without_a_read_is_not_a_missing_device() {
         let o = Observation { fresh: false, ..obs(10, true, 50, 600) };
         let mut j = Journal::new();
         let line = j
-            .note(&Tick { now_s: 10, action: Action::Warn, obs: &o, on_battery_for: Some(10), dry_run: true })
+            .note(&Tick { now_s: 10, action: Action::Warn, obs: &o, on_battery_for: Some(10), dry_run: true, stale: false })
             .unwrap();
-        assert!(line.1.contains("NOT FRESH"), "{line:?}");
-        assert!(line.1.contains("50%"), "{line:?}");
+        assert!(!line.1.contains("NOT ANSWERING"), "{line:?}");
     }
 
     #[test]
@@ -311,7 +335,7 @@ mod tests {
         let o = Observation { charge: None, runtime_s: None, ..obs(10, true, 0, 0) };
         let mut j = Journal::new();
         let line = j
-            .note(&Tick { now_s: 10, action: Action::Warn, obs: &o, on_battery_for: Some(10), dry_run: true })
+            .note(&Tick { now_s: 10, action: Action::Warn, obs: &o, on_battery_for: Some(10), dry_run: true, stale: false })
             .unwrap();
         assert!(line.1.contains("charge unknown"), "{line:?}");
         assert!(line.1.contains("runtime unknown"), "{line:?}");
@@ -330,6 +354,7 @@ mod tests {
             obs: &o,
             on_battery_for: Some(10),
             dry_run,
+            stale: false,
         };
         assert!(dry.note(&t(true)).unwrap().1.starts_with("would shut down"));
         assert!(armed.note(&t(false)).unwrap().1.starts_with("shutting down"));

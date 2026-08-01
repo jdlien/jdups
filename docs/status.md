@@ -116,25 +116,18 @@ argument; the short version, with the first rung now done:
 2. The shutdown **transaction** with a persisted intent record, ordered so the
    OS commits before the UPS is armed. `SE_SHUTDOWN_NAME` must be explicitly
    enabled and `AdjustTokenPrivileges` checked for `ERROR_NOT_ALL_ASSIGNED`.
-3. **The restart handshake is the real unknown, so do it first.** The transaction
-   above has no unknowns and will take the same shape whenever it is written;
-   this is the only thing that could change the *design*, and it needs hardware
-   and a load nobody minds losing. Learn it before building on it.
+3. ~~The restart handshake.~~ **Settled 2026-08-01, and there isn't one.** A real
+   PowerChute shutdown was watched register by register. **Report 65 (`FF86:7D`)
+   is the shutdown countdown** — set to 120, decremented by the UPS in real time,
+   output cut at zero. **Report 64 (`FF86:7C`) is the armed flag.** **Report 21,
+   the standard `DelayBeforeShutdown`, was never touched.** Write 65, not 21.
 
-   `DelayBeforeStartup` (`0084:56`) does not exist on this device, nor does
-   `DelayBeforeReboot`. The hypothesis is report 65, `FF86:7D`. Measured
-   support, as of 2026-08-01: its range is `-1..32767`, **identical** to
-   `DelayBeforeShutdown`, and it currently reads **-1**, the same idle value.
-   A register whose unset state is -1 is a delay with a cancel, not a counter
-   and not a flag. Report 64 (`FF86:7C`) is a companion boolean reading 0.
+   Mains returned, the UPS restored output unaided, and both registers reset
+   themselves. Nothing to configure. The PC did not power on, which is a BIOS
+   "restore on AC power loss" setting, not a UPS one.
 
-   **The cheap experiment, before any write:** PowerChute is a working
-   implementation of exactly this, still installed and armed. The agent now
-   logs reports 21/64/65 whenever they move, so a PowerChute-initiated shutdown
-   records what the vendor writes, in our log, with no write of our own. If it
-   touches 65, the hypothesis is confirmed by observation rather than by
-   experiment. Confirm against NUT's `apc-hid.c` as well, then prove the full
-   shutdown → mains-return → restart cycle **on a sacrificial load**.
+   Still open, and small: whether 64 is written or merely reflects an armed
+   countdown. The first sample already had it set, so the order was never seen.
 4. Dry-run for weeks. Absurd thresholds to test the trigger cheaply. Only then
    realistic ones, and only then disarm PowerChute.
 

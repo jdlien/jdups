@@ -38,7 +38,31 @@ pub mod report {
     /// APC vendor `FF86:52`, 0..13. Last transfer reason.
     pub const LAST_TRANSFER: u8 = 54;
     /// DelayBeforeShutdown (`84:57`), i16, -1 = none scheduled. Also on 66.
+    ///
+    /// **The standard register, and PowerChute does not use it.** Observed
+    /// sitting at -1 through an entire vendor-driven shutdown; see
+    /// `APC_SHUTDOWN_COUNTDOWN` for the one that actually works on this unit.
     pub const DELAY_BEFORE_SHUTDOWN: u8 = 21;
+
+    /// APC vendor `FF86:7C`, 0..1. Set while a countdown is armed.
+    ///
+    /// Read 1 for the whole of the observed shutdown and 0 either side of it.
+    /// Whether it is written or merely reflects the countdown is not yet known:
+    /// the first sample already had it set, so the order was never seen.
+    pub const APC_SHUTDOWN_ARMED: u8 = 64;
+
+    /// APC vendor `FF86:7D`, i16, -1 = none scheduled. **This is the one.**
+    ///
+    /// Seconds until the UPS cuts its own output. Measured 2026-08-01 by
+    /// watching a real PowerChute shutdown: it set this to 120 and the value
+    /// counted down in real time (119, 116, 114, ... 98) while report 21 stayed
+    /// at -1 throughout. The UPS cut output when it reached zero.
+    ///
+    /// The plan had this backwards. It was labelled the *restart* delay on the
+    /// reasoning that its `-1..32767` range matched `DelayBeforeShutdown` — which
+    /// was the right observation and the wrong conclusion. It matches because it
+    /// **is** a shutdown delay, just APC's own.
+    pub const APC_SHUTDOWN_COUNTDOWN: u8 = 65;
 }
 
 /// HID usage pages this device speaks.

@@ -90,6 +90,9 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut charge: Option<u8> = None;
     let mut runtime_s: Option<u16> = None;
     let mut last_countdown: Option<(Option<i16>, Option<u8>, Option<i16>)> = None;
+    // When the device last actually answered. `Observation::fresh` is per-pass
+    // and says nothing about health; this is what the log should report.
+    let mut last_answer = Instant::now();
 
     while !stop.load(Ordering::SeqCst) {
         let mut fresh = false;
@@ -118,7 +121,8 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     // backstop are the whole point: an outage that takes the USB
                     // link with it must not become an agent that sits quiet.
                     let o = observe(&start, false, &status, charge, runtime_s);
-                    tick(&mut state, &mut journal, &o, &cfg, dry_run, &say);
+                    let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
+                    tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
 
                     sleep_interruptibly(backoff.min(POLL_EVERY), &stop);
                     backoff = (backoff * 2).min(RETRY_MAX);
@@ -178,7 +182,11 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
 
         let o = observe(&start, fresh, &status, charge, runtime_s);
-        tick(&mut state, &mut journal, &o, &cfg, dry_run, &say);
+        if o.fresh {
+            last_answer = Instant::now();
+        }
+        let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
+        tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
 
         // --- watch the countdown registers ---------------------------------
         // On battery this runs every pass rather than every poll. The moment
@@ -210,24 +218,20 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
 
 /// The three registers that arm and cancel a UPS-side power cut.
 ///
-/// Read every poll and logged whenever they move. Two reasons, and the first is
-/// temporary but valuable:
+/// This watch was built to settle a hypothesis and it did, on 2026-08-01, by
+/// observing a real PowerChute shutdown: **report 65 is the countdown**, set to
+/// 120 and decrementing in real time until the UPS cut its own output, while the
+/// standard `DelayBeforeShutdown` on report 21 was never touched at all. See
+/// `report::APC_SHUTDOWN_COUNTDOWN`.
 ///
-/// 1. **PowerChute is a working implementation of the thing being
-///    reverse-engineered**, and it is still installed and armed. When it shuts
-///    this machine down it must write report 21, and it may write 64 and 65 —
-///    which are the restart-handshake hypothesis and nothing more until
-///    something is observed. Watching costs one poll and settles by observation
-///    what would otherwise be settled by experiment on a sacrificial load.
-/// 2. **The agent will need this permanently.** The plan requires reading back
-///    every write and reconciling any pending countdown on restart, and is
-///    explicit that a countdown must never be blindly cleared: it could be the
-///    only thing that will restore power. That needs a record of what was armed
-///    and by whom.
+/// It stays because the agent needs it permanently. The plan requires reading
+/// back every write and reconciling any pending countdown on restart, and is
+/// explicit that one must never be blindly cleared: it could be the only thing
+/// that will restore power. That needs a record of what was armed and when.
 ///
-/// Report 65 sitting at -1 alongside `DelayBeforeShutdown`'s own idle -1 is the
-/// reason to bother. A register whose unset value is -1 is a delay with a
-/// cancel, not a counter and not a flag.
+/// Report 21 is still read. It is not used by the vendor on this unit, but a
+/// value appearing there would mean something else is arming this UPS, and that
+/// is worth knowing.
 fn countdown(dev: &hid::raw::Device) -> (Option<i16>, Option<u8>, Option<i16>) {
     let i16_at = |id: u8| -> Option<i16> {
         let b = dev.feature(id).ok()?;
@@ -239,16 +243,10 @@ fn countdown(dev: &hid::raw::Device) -> (Option<i16>, Option<u8>, Option<i16>) {
     };
     (
         i16_at(report::DELAY_BEFORE_SHUTDOWN),
-        u8_at(APC_RESTART_FLAG),
-        i16_at(APC_RESTART_DELAY),
+        u8_at(report::APC_SHUTDOWN_ARMED),
+        i16_at(report::APC_SHUTDOWN_COUNTDOWN),
     )
 }
-
-/// `FF86:7C`, boolean. Companion to the one below; meaning unconfirmed.
-const APC_RESTART_FLAG: u8 = 64;
-/// `FF86:7D`, `-1..32767`. Shaped exactly like `DelayBeforeShutdown` and idles
-/// at the same -1. The restart-delay hypothesis.
-const APC_RESTART_DELAY: u8 = 65;
 
 fn describe_countdown(c: &(Option<i16>, Option<u8>, Option<i16>)) -> String {
     let show = |v: Option<i16>| match v {
@@ -257,10 +255,10 @@ fn describe_countdown(c: &(Option<i16>, Option<u8>, Option<i16>)) -> String {
         None => "?".into(),
     };
     format!(
-        "UPS countdown registers moved: shutdown(21)={} flag(64)={} restart(65)={}",
-        show(c.0),
-        c.1.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        "UPS countdown: apc(65)={} armed(64)={} standard(21)={}",
         show(c.2),
+        c.1.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        show(c.0),
     )
 }
 
@@ -292,6 +290,7 @@ fn tick(
     o: &Observation,
     cfg: &jdups::policy::Config,
     dry_run: bool,
+    stale: bool,
     say: &dyn Fn(Level, &str),
 ) {
     let action = state.observe(o, cfg);
@@ -301,6 +300,7 @@ fn tick(
         obs: o,
         on_battery_for: state.on_battery_for(o.now_s),
         dry_run,
+        stale,
     };
     if let Some((level, msg)) = journal.note(&t) {
         say(level, &msg);
