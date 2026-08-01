@@ -168,13 +168,37 @@ foreach ($exe in $wanted) {
 }
 
 # --- Copy --------------------------------------------------------------------
+# Everything currently running is stopped *first*, before anything is copied or
+# any task is restarted. Doing it per-binary meant the old tray was still alive
+# and watching while its neighbours were killed out from under it -- and a tray
+# that briefly loses the device and finds it again looks exactly like a power
+# event to the code that watches for one. An upgrade should not be able to
+# generate notifications about itself.
+#
+# Stopped by full image path, never by bare name: `Stop-Process -Name jdups`
+# would also kill a development build running out of target\release, which is an
+# unpleasant surprise in the middle of working on this.
+$running = @()
+foreach ($exe in $src.Keys) {
+    $running += Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($exe)) -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -eq (Join-Path $InstallDir $exe) }
+}
+foreach ($p in $running) {
+    try {
+        # The tray gets a WM_CLOSE first, which is what removes its notification
+        # icon. Killing it outright leaves a ghost behind until Explorer
+        # restarts, which uninstall.ps1 already knew and this did not.
+        $p.CloseMainWindow() | Out-Null
+        Start-Sleep -Milliseconds 300
+        if (-not $p.HasExited) { $p | Stop-Process -Force }
+        Write-Host "  stopped $(Split-Path -Leaf $p.Path)"
+    } catch { Fail "stopping $($p.Path): $_" }
+}
+if ($running) { Start-Sleep -Milliseconds 400 }
+
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 foreach ($exe in $src.Keys) {
     try {
-        # A running tray holds its own image open.
-        Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($exe)) -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -eq (Join-Path $InstallDir $exe) } |
-            Stop-Process -Force
         Copy-Item $src[$exe] (Join-Path $InstallDir $exe) -Force
         Write-Host "  copied $exe"
     } catch { Fail "copying ${exe}: $_" }
