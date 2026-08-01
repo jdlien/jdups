@@ -48,10 +48,13 @@ impl Reading {
         if !self.have_status {
             return "Status unknown".into();
         }
+        // "Online", not PowerChute's "On line". One word is the canonical
+        // spelling, and the log's event tag was already `online` -- so the two
+        // halves of this program disagreed with each other.
         let where_ = if self.status.on_battery() {
             "On battery"
         } else {
-            "On line"
+            "Online"
         };
         match (self.charge, self.runtime_min()) {
             (Some(c), Some(m)) => format!("{where_}, {c}%, {m} min"),
@@ -488,7 +491,7 @@ mod tests {
 
     #[test]
     fn the_status_line_names_where_the_power_is_coming_from() {
-        assert_eq!(on_mains(100).status_line(), "On line, 100%, 43 min");
+        assert_eq!(on_mains(100).status_line(), "Online, 100%, 43 min");
         assert_eq!(on_battery(600).status_line(), "On battery, 80%, 10 min");
     }
 

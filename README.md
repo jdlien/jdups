@@ -4,7 +4,7 @@ A small Windows tray readout for an APC Back-UPS RS 1500MS2: charge, runtime,
 load, voltages, at a click.
 
 ```
-On line, 100%, 43 min
+Online, 100%, 43 min
 Load               20%  (180 W)
 Input              117 V
 Battery            27.26 V

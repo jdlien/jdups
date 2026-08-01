@@ -675,7 +675,7 @@ Done. 48 tests, clippy clean. `jdups.exe` 179 KB, `jdups-tray.exe` 183 KB.
 ## Phase 4 — menu
 
 ```
-  ▮ On line — 100%, 43 min
+  ▮ Online, 100%, 43 min
   ─────────────
   Load               20%  (180 W)
   Input             117 V
