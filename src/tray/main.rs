@@ -30,6 +30,7 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleW, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
@@ -48,6 +49,8 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_SNAPSHOT: u32 = WM_APP + 2;
 /// `--balloon`, forwarded to whichever instance already owns the icon.
 const WM_TEST_BALLOON: u32 = WM_APP + 3;
+/// Repaints the icon once a second, and only while a shutdown is pending.
+const TIMER_COUNTDOWN: usize = 1;
 
 /// `WM_USER`-based notification-icon events windows-sys doesn't surface.
 const NIN_SELECT: u32 = 0x0400;
@@ -80,6 +83,15 @@ struct App {
     /// `check_agent`: the agent runs as SYSTEM and cannot show a notification,
     /// so this process is the only half that can deliver its warning.
     agent_seq: Option<u64>,
+    /// `GetTickCount64` at which the shutdown lands, while one is pending.
+    ///
+    /// Held as a deadline rather than as a remaining count so the icon can tick
+    /// once a second off a local timer. The agent publishes every couple of
+    /// seconds at best, and a countdown that reads straight from the file would
+    /// jump 60, 57, 55 -- which loses the one thing that makes the digits
+    /// legible as seconds, that they move one at a time. Each publish re-syncs
+    /// this, so local drift cannot accumulate.
+    pending_until: Option<u64>,
     /// Whether the user has been told the UPS stopped answering. See `notice`:
     /// without it, the `Unknown` -> `Mains` settle that happens at every single
     /// startup is indistinguishable from a real reconnection.
@@ -298,6 +310,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             last_power: None,
             reported_missing: false,
             agent_seq: None,
+            pending_until: None,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
 
@@ -442,13 +455,40 @@ fn gauge_for(s: &Snapshot) -> draw::Gauge {
     }
 }
 
+/// The icon during the grace period: the countdown, in seconds, in red.
+///
+/// The icon shows minutes remaining the rest of the time, and this quietly
+/// switches the unit without saying so — which sounds like a trap and is not.
+/// At this moment the seconds remaining *are* the runtime the machine is being
+/// given, and a number ticking down one at a time reads unmistakably as seconds
+/// where the same number sitting still would not. It is the one place the change
+/// of unit explains itself.
+///
+/// Two digits is the whole budget, which is exactly enough: a warning long
+/// enough to need three is a warning nobody is reading anyway, and `validate`
+/// caps it well below that. Anything larger is clamped to 99 rather than
+/// wrapping, so a misconfiguration shows an implausible number instead of a
+/// plausible wrong one.
+///
+/// The charge fill stays, so the icon does not stop being a battery.
+fn gauge_pending(s: &Snapshot, seconds_left: u64) -> draw::Gauge {
+    draw::Gauge {
+        charge: s.reading.charge,
+        digits: Some(seconds_left.min(99) as u8),
+        tint: draw::Tint::Critical,
+    }
+}
+
 unsafe fn refresh(app: *mut App) {
     let snap = match unsafe { (*app).monitor.as_ref() } {
         Some(m) => m.snapshot(),
         None => return,
     };
 
-    let gauge = gauge_for(&snap);
+    let gauge = match unsafe { pending_seconds(app) } {
+        Some(n) => gauge_pending(&snap, n),
+        None => gauge_for(&snap),
+    };
     let dpi = unsafe { icon_dpi(app) };
 
     if unsafe { (*app).icon_key } != Some((gauge, dpi)) {
@@ -512,9 +552,21 @@ unsafe fn refresh(app: *mut App) {
 /// Keyed on the published sequence number rather than on the contents, so a
 /// warning fires exactly once and is never mistaken for one already given.
 unsafe fn check_agent(app: *mut App) {
-    use jdups::status::Event;
+    use jdups::status::{Event, Phase};
 
-    let Some(st) = jdups::status::read() else { return };
+    let Some(st) = jdups::status::read() else {
+        unsafe { set_pending(app, None) };
+        return;
+    };
+
+    // The countdown first, and independently of the announcement. These are
+    // different jobs: the notification fires once, the icon has to keep moving.
+    let until = match (st.phase, st.seconds_left) {
+        (Phase::Pending, Some(n)) => Some(unsafe { GetTickCount64() } + n * 1000),
+        _ => None,
+    };
+    unsafe { set_pending(app, until) };
+
     let seen = unsafe { (*app).agent_seq };
 
     // First sight of the file adopts its sequence in silence. Otherwise starting
@@ -554,6 +606,40 @@ unsafe fn check_agent(app: *mut App) {
         Event::None => return,
     };
     unsafe { balloon(app, &title, &body) };
+}
+
+/// Seconds until the pending shutdown, or `None` when none is pending.
+///
+/// Saturating: once the deadline passes this reads zero rather than wrapping to
+/// something enormous. The machine is going down at that point anyway, but an
+/// icon reading 99 in its final second would be a poor last impression.
+unsafe fn pending_seconds(app: *mut App) -> Option<u64> {
+    let until = unsafe { (*app).pending_until }?;
+    let now = unsafe { GetTickCount64() };
+    Some(until.saturating_sub(now).div_ceil(1000))
+}
+
+/// Start or stop the once-a-second repaint that makes the digits tick.
+///
+/// Only runs while something is pending. The tray is otherwise driven entirely
+/// by the device thread, and a timer left running would repaint the icon every
+/// second forever for no reason.
+unsafe fn set_pending(app: *mut App, until: Option<u64>) {
+    let was = unsafe { (*app).pending_until };
+    unsafe { (*app).pending_until = until };
+    if was.is_some() == until.is_some() {
+        return;
+    }
+    let hwnd = unsafe { (*app).hwnd };
+    if until.is_some() {
+        unsafe { SetTimer(hwnd, TIMER_COUNTDOWN, 1000, None) };
+    } else {
+        unsafe { KillTimer(hwnd, TIMER_COUNTDOWN) };
+        // Back to whatever the device says, at once, rather than at the next
+        // snapshot: a cancelled shutdown should not leave a red icon sitting
+        // there counting nothing.
+        unsafe { refresh(app) };
+    }
 }
 
 /// What to tell the user about a change of power state, if anything.
@@ -943,6 +1029,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             unsafe { check_agent(app) };
             0
         }
+        WM_TIMER if wp == TIMER_COUNTDOWN => {
+            unsafe { refresh(app) };
+            0
+        }
         WM_TEST_BALLOON => {
             unsafe { balloon(app, "UPS Status", "Test notification.") };
             0
@@ -973,6 +1063,37 @@ mod tests {
     use super::*;
     use jdups::decode::{PresentStatus, PAGE_BATTERY};
     use jdups::model::Reading;
+
+    /// Two digits is the whole budget the icon has. A warning longer than 99 s
+    /// must clamp rather than wrap: 105 seconds wrapping to "05" would be a
+    /// countdown that lies in the direction of panic.
+    #[test]
+    fn the_countdown_clamps_instead_of_wrapping() {
+        let s = snap(Reading::default(), true, Some(0));
+        assert_eq!(gauge_pending(&s, 60).digits, Some(60));
+        assert_eq!(gauge_pending(&s, 99).digits, Some(99));
+        assert_eq!(gauge_pending(&s, 100).digits, Some(99));
+        assert_eq!(gauge_pending(&s, 100_000).digits, Some(99));
+    }
+
+    /// Zero is a real value here, not a missing one. It is the last thing the
+    /// icon shows before the machine goes down.
+    #[test]
+    fn the_countdown_shows_zero_rather_than_nothing() {
+        let s = snap(Reading::default(), true, Some(0));
+        assert_eq!(gauge_pending(&s, 0).digits, Some(0));
+    }
+
+    /// A pending shutdown reads as critical whatever the battery is doing, and
+    /// keeps its fill so it still looks like a battery.
+    #[test]
+    fn a_pending_shutdown_is_always_critical() {
+        let r = Reading { charge: Some(80), ..Reading::default() };
+        let s = snap(r, true, Some(0));
+        let g = gauge_pending(&s, 30);
+        assert_eq!(g.tint, draw::Tint::Critical);
+        assert_eq!(g.charge, Some(80));
+    }
 
     /// Drive a sequence of power states and collect what the user is told.
     fn told(states: &[Power]) -> Vec<&'static str> {

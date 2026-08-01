@@ -342,7 +342,16 @@ fn publish(
         jdups::policy::Action::Shutdown(why) => Some(why.as_str().to_string()),
         _ => None,
     };
-    let changed = published.phase != phase || published.reason != reason || event != Event::None;
+    // While a shutdown is pending, every pass. The tray ticks its own clock
+    // between publishes and re-syncs to each one, so a coarse cadence here shows
+    // up as the countdown jumping backwards a second or two whenever a stale
+    // value arrives. During the grace period this writes a small file a few
+    // times a second for under a minute, which is a fair price for digits that
+    // only ever go down.
+    let changed = published.phase != phase
+        || published.reason != reason
+        || event != Event::None
+        || phase == Phase::Pending;
     if !changed && last.elapsed() < Duration::from_secs(5) {
         return;
     }
