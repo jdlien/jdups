@@ -320,6 +320,48 @@ if (-not $SamplerOnly) {
     } catch { Fail "registering ${TrayTask}: $_" }
 }
 
+# --- Check the work, rather than reporting the attempt ---------------------
+# Everything above prints on the strength of a cmdlet not throwing. That is not
+# the same as it having worked, and the difference is invisible afterwards:
+# an unelevated `Get-ScheduledTask` cannot see a SYSTEM-principal task at all --
+# its task file is ACL'd against ordinary users -- so checking by hand later
+# shows one task of three and looks like a half-finished install.
+#
+# This block runs while still elevated, which is the only moment all three are
+# visible at once. It is also the only report here that is evidence.
+Write-Host ""
+Write-Host "Verifying:"
+$expected = @()
+if (-not $TrayOnly)    { $expected += $SamplerTask }
+if ($Agent)            { $expected += $AgentTask }
+if (-not $SamplerOnly) { $expected += $TrayTask }
+
+foreach ($t in $expected) {
+    $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
+    if (-not $task) {
+        Fail "$t did not register"
+        continue
+    }
+    $info = $task | Get-ScheduledTaskInfo
+    # 0x41301 is "currently running", which is success, not an error code.
+    $result = if ($info.LastTaskResult -eq 0x41301) { "running" }
+              else { "last result 0x{0:X}" -f $info.LastTaskResult }
+    Write-Host ("  {0,-14} {1,-9} as {2}  ({3})" -f $t, $task.State, $task.Principal.UserId, $result)
+}
+
+# The logs are the real proof for the two headless tasks: a process that started
+# and immediately died would still leave the task looking fine.
+if (-not $TrayOnly) {
+    Start-Sleep -Seconds 2
+    foreach ($pattern in @("jdups-*.csv", "jdups-agent-*.log")) {
+        $f = Get-ChildItem (Join-Path $LogDir $pattern) -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime | Select-Object -Last 1
+        if ($f) {
+            Write-Host "  wrote          $($f.Name) ($($f.Length) bytes)"
+        }
+    }
+}
+
 Write-Host ""
 if ($failed) {
     Write-Host "Finished with errors." -ForegroundColor Red

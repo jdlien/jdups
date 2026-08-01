@@ -76,6 +76,10 @@ struct App {
     taskbar_created: u32,
     monitor: Option<device::Monitor>,
     last_power: Option<Power>,
+    /// Whether the user has been told the UPS stopped answering. See `notice`:
+    /// without it, the `Unknown` -> `Mains` settle that happens at every single
+    /// startup is indistinguishable from a real reconnection.
+    reported_missing: bool,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -288,6 +292,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             monitor: None,
             last_power: None,
+            reported_missing: false,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
 
@@ -476,12 +481,45 @@ unsafe fn refresh(app: *mut App) {
     unsafe { (*app).last_power = Some(power) };
     if let Some(prev) = previous {
         if prev != power {
-            let (title, body) = match power {
-                Power::Mains => ("Power restored", snap.status_line()),
-                Power::Battery | Power::Critical => ("On battery", snap.status_line()),
-                Power::Unknown => ("UPS not responding", snap.status_line()),
-            };
-            unsafe { balloon(app, title, &body) };
+            let missing = unsafe { &mut (*app).reported_missing };
+            if let Some(title) = notice(prev, power, missing) {
+                unsafe { balloon(app, title, &snap.status_line()) };
+            }
+        }
+    }
+}
+
+/// What to tell the user about a change of power state, if anything.
+///
+/// Pulled out of `refresh` because it got this wrong in a way that was only
+/// visible on a machine that had *not* had a power cut: every launch announced
+/// **"Power restored"**. The first snapshot is always `Unknown` — the device
+/// thread has not read anything yet — and the second is `Mains`, so the plain
+/// `prev != now` test saw a transition and reported the wrong one. Nothing had
+/// been restored. The tray had merely stopped being ignorant.
+///
+/// `Unknown` is not a power state. It means "no idea", and coming back from no
+/// idea is only worth a notification if the user was told about it in the first
+/// place, which is what `reported_missing` tracks. Without it, a startup settle
+/// and a genuine reconnection are indistinguishable from the states alone.
+fn notice(prev: Power, now: Power, reported_missing: &mut bool) -> Option<&'static str> {
+    match now {
+        Power::Unknown => {
+            *reported_missing = true;
+            Some("UPS not responding")
+        }
+        Power::Battery | Power::Critical => {
+            *reported_missing = false;
+            Some("On battery")
+        }
+        Power::Mains => {
+            let was_missing = std::mem::replace(reported_missing, false);
+            match prev {
+                // Never lost power; only ever lost track of it. Say so, and only
+                // if the loss was announced.
+                Power::Unknown => was_missing.then_some("UPS responding again"),
+                _ => Some("Power restored"),
+            }
         }
     }
 }
@@ -867,6 +905,75 @@ mod tests {
     use super::*;
     use jdups::decode::{PresentStatus, PAGE_BATTERY};
     use jdups::model::Reading;
+
+    /// Drive a sequence of power states and collect what the user is told.
+    fn told(states: &[Power]) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut missing = false;
+        let mut last: Option<Power> = None;
+        for &now in states {
+            if let Some(prev) = last {
+                if prev != now {
+                    if let Some(t) = notice(prev, now, &mut missing) {
+                        out.push(t);
+                    }
+                }
+            }
+            last = Some(now);
+        }
+        out
+    }
+
+    /// The bug this exists to prevent. Every launch begins Unknown, because the
+    /// device thread has not read anything yet, and settles to Mains a moment
+    /// later. That is not a power event and must not be announced as one.
+    #[test]
+    fn starting_up_on_mains_says_nothing_at_all() {
+        assert_eq!(told(&[Power::Unknown, Power::Mains, Power::Mains]), Vec::<&str>::new());
+    }
+
+    /// ...and the same is true of an install, a logoff, or an Explorer restart,
+    /// each of which starts a fresh tray on a machine with perfectly good power.
+    #[test]
+    fn repeated_restarts_stay_silent() {
+        for _ in 0..5 {
+            assert!(told(&[Power::Unknown, Power::Mains]).is_empty());
+        }
+    }
+
+    /// Starting up *during* an outage is worth saying, though. Silence here
+    /// would be the opposite mistake.
+    #[test]
+    fn starting_up_on_battery_does_say_so() {
+        assert_eq!(told(&[Power::Unknown, Power::Battery]), vec!["On battery"]);
+    }
+
+    #[test]
+    fn a_real_outage_and_recovery_reads_correctly() {
+        assert_eq!(
+            told(&[Power::Unknown, Power::Mains, Power::Battery, Power::Critical, Power::Mains]),
+            vec!["On battery", "On battery", "Power restored"]
+        );
+    }
+
+    /// Losing the UPS is announced, and so is getting it back — but as a device
+    /// event, not as "Power restored", which would claim an outage that never
+    /// happened.
+    #[test]
+    fn losing_the_device_and_getting_it_back_is_not_a_power_event() {
+        assert_eq!(
+            told(&[Power::Unknown, Power::Mains, Power::Unknown, Power::Mains]),
+            vec!["UPS not responding", "UPS responding again"]
+        );
+    }
+
+    /// A device that drops out mid-outage and comes back still on battery has
+    /// not had its power restored either.
+    #[test]
+    fn a_dropout_during_an_outage_does_not_claim_recovery() {
+        let said = told(&[Power::Mains, Power::Battery, Power::Unknown, Power::Battery]);
+        assert!(!said.contains(&"Power restored"), "{said:?}");
+    }
 
     fn snap(reading: Reading, ok: bool, age: Option<u64>) -> Snapshot {
         Snapshot {
