@@ -24,6 +24,7 @@ use jdups::decode::{self, report, PresentStatus};
 use jdups::hid::{self, Ups};
 use jdups::logfile;
 use jdups::policy::{Observation, State};
+use jdups::status::{self, Event, Phase, Status};
 
 use crate::journal::{Journal, Level, Tick};
 use crate::log;
@@ -93,6 +94,11 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     // When the device last actually answered. `Observation::fresh` is per-pass
     // and says nothing about health; this is what the log should report.
     let mut last_answer = Instant::now();
+    // The grace period. `Some(t)` once the decision is made, holding the
+    // monotonic instant it was made at.
+    let mut committed_at: Option<u64> = None;
+    let mut published = Status::default();
+    let mut last_publish = Instant::now() - Duration::from_secs(60);
 
     while !stop.load(Ordering::SeqCst) {
         let mut fresh = false;
@@ -186,7 +192,63 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             last_answer = Instant::now();
         }
         let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
-        tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
+        let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
+
+        // --- the grace period ------------------------------------------------
+        // The decision is announced before it is acted on, so whoever is at the
+        // machine gets a chance to save their work. It lives here rather than in
+        // `policy` because it is about carrying a decision out politely, not
+        // about what the numbers mean -- and because cancelling is simply the
+        // policy no longer saying Shutdown, which is observed for free.
+        let mut event = Event::None;
+        match action {
+            jdups::policy::Action::Shutdown(why) => {
+                let at = *committed_at.get_or_insert(o.now_s);
+                let waited = o.now_s.saturating_sub(at);
+                if waited == 0 {
+                    event = Event::Pending;
+                    say(
+                        Level::Act,
+                        &format!(
+                            "shutting down in {} s: {}. Save your work.",
+                            cfg.warn_before_s,
+                            why.as_str()
+                        ),
+                    );
+                }
+                if waited >= cfg.warn_before_s && published.event != Event::Shutdown {
+                    event = Event::Shutdown;
+                    // The transaction goes here, and does not exist yet. Arming
+                    // is refused at startup so `dry_run` is always true today;
+                    // naming the site beats implying it.
+                    say(
+                        Level::Act,
+                        if dry_run {
+                            "the grace period is up: this is where it would shut down"
+                        } else {
+                            "the grace period is up, and the shutdown transaction is not written yet"
+                        },
+                    );
+                }
+            }
+            _ => {
+                if committed_at.take().is_some() {
+                    event = Event::Cancelled;
+                    say(Level::Act, "shutdown cancelled: the machine is no longer past the trigger");
+                }
+            }
+        }
+
+        publish(
+            &opts.dir,
+            &mut published,
+            &mut last_publish,
+            !dry_run,
+            phase_of(action, &o),
+            committed_at.map(|at| cfg.warn_before_s.saturating_sub(o.now_s.saturating_sub(at))),
+            action,
+            event,
+        );
 
         // --- watch the countdown registers ---------------------------------
         // On battery this runs every pass rather than every poll. The moment
@@ -248,6 +310,62 @@ fn countdown(dev: &hid::raw::Device) -> (Option<i16>, Option<u8>, Option<i16>) {
     )
 }
 
+fn phase_of(action: jdups::policy::Action, o: &Observation) -> Phase {
+    if action.is_shutdown() {
+        Phase::Pending
+    } else if o.on_battery {
+        Phase::OnBattery
+    } else {
+        Phase::Idle
+    }
+}
+
+/// Publish for the tray.
+///
+/// Rewritten on any change and otherwise once every few seconds, so a stale file
+/// is recognisable as stale by its timestamp. The tray reads this; nothing here
+/// reads anything the tray writes, because the agent is SYSTEM and taking input
+/// from an unprivileged process is exactly the bug this project avoids
+/// elsewhere.
+#[allow(clippy::too_many_arguments)]
+fn publish(
+    dir: &std::path::Path,
+    published: &mut Status,
+    last: &mut Instant,
+    armed: bool,
+    phase: Phase,
+    seconds_left: Option<u64>,
+    action: jdups::policy::Action,
+    event: Event,
+) {
+    let reason = match action {
+        jdups::policy::Action::Shutdown(why) => Some(why.as_str().to_string()),
+        _ => None,
+    };
+    let changed = published.phase != phase || published.reason != reason || event != Event::None;
+    if !changed && last.elapsed() < Duration::from_secs(5) {
+        return;
+    }
+
+    published.phase = phase;
+    published.reason = reason;
+    published.seconds_left = seconds_left;
+    published.armed = armed;
+    published.updated = logfile::now_local().iso8601();
+    // Only a real event advances the sequence. The tray keys "is this new" on
+    // it, and bumping it on a routine refresh would re-announce a shutdown that
+    // had already been announced -- or, worse, train the tray to ignore it.
+    if event != Event::None {
+        published.seq += 1;
+        published.event = event;
+    }
+    *last = Instant::now();
+
+    if let Err(e) = status::write(dir, published) {
+        eprintln!("jdups-agent: could not publish status: {e}");
+    }
+}
+
 fn describe_countdown(c: &(Option<i16>, Option<u8>, Option<i16>)) -> String {
     let show = |v: Option<i16>| match v {
         Some(-1) => "none".to_string(),
@@ -292,7 +410,7 @@ fn tick(
     dry_run: bool,
     stale: bool,
     say: &dyn Fn(Level, &str),
-) {
+) -> jdups::policy::Action {
     let action = state.observe(o, cfg);
     let t = Tick {
         now_s: o.now_s,
@@ -305,14 +423,7 @@ fn tick(
     if let Some((level, msg)) = journal.note(&t) {
         say(level, &msg);
     }
-
-    // The one branch this phase does not have. Arming is refused at startup,
-    // so `dry_run` is always true here today; the arm is deliberately a
-    // separate change with its own testing ladder, and leaving the site named
-    // is better than leaving it implied.
-    if action.is_shutdown() && !dry_run {
-        say(Level::Act, "armed shutdown is not implemented yet; doing nothing");
-    }
+    action
 }
 
 fn sleep_interruptibly(d: Duration, stop: &AtomicBool) {

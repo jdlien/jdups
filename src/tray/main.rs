@@ -76,6 +76,10 @@ struct App {
     taskbar_created: u32,
     monitor: Option<device::Monitor>,
     last_power: Option<Power>,
+    /// The last agent status sequence the user was told about. See
+    /// `check_agent`: the agent runs as SYSTEM and cannot show a notification,
+    /// so this process is the only half that can deliver its warning.
+    agent_seq: Option<u64>,
     /// Whether the user has been told the UPS stopped answering. See `notice`:
     /// without it, the `Unknown` -> `Mains` settle that happens at every single
     /// startup is indistinguishable from a real reconnection.
@@ -293,6 +297,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             monitor: None,
             last_power: None,
             reported_missing: false,
+            agent_seq: None,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
 
@@ -487,6 +492,65 @@ unsafe fn refresh(app: *mut App) {
             }
         }
     }
+}
+
+/// Deliver the agent's shutdown warning, which the agent cannot deliver itself.
+///
+/// It runs as SYSTEM in **session 0**: no window station, no desktop, no way to
+/// put anything on screen, and it must not be given one. It publishes to a file
+/// that only SYSTEM and Administrators can write, and this reads it. The trust
+/// runs one way, which is the point.
+///
+/// **The warning is the whole reason the grace period exists.** PowerChute shows
+/// a modal dialog with an OK button at this moment. A notification is better,
+/// and not by a little: a shutdown that can be stalled by a dialog nobody is
+/// present to dismiss means the battery decides when the machine goes down.
+///
+/// Keyed on the published sequence number rather than on the contents, so a
+/// warning fires exactly once and is never mistaken for one already given.
+unsafe fn check_agent(app: *mut App) {
+    use jdups::status::Event;
+
+    let Some(st) = jdups::status::read() else { return };
+    let seen = unsafe { (*app).agent_seq };
+
+    // First sight of the file adopts its sequence in silence. Otherwise starting
+    // the tray -- at logon, after an Explorer restart -- would replay whatever
+    // announcement happened to be sitting in the file, for an event long over.
+    if seen.is_none() {
+        unsafe { (*app).agent_seq = Some(st.seq) };
+        return;
+    }
+    if seen == Some(st.seq) {
+        return;
+    }
+    unsafe { (*app).agent_seq = Some(st.seq) };
+
+    let dry = !st.armed;
+    let reason = st.reason.unwrap_or_else(|| "the UPS is running low".into());
+    let (title, body) = match st.event {
+        Event::Pending => {
+            let secs = st.seconds_left.unwrap_or(0);
+            if dry {
+                ("UPS shutdown (dry run)".to_string(), format!("Would shut down in {secs} s. {reason}."))
+            } else {
+                ("Shutting down soon".to_string(), format!("This PC shuts down in {secs} s. Save your work now. {reason}."))
+            }
+        }
+        Event::Cancelled => (
+            "Shutdown cancelled".to_string(),
+            "Power came back. This PC is no longer shutting down.".to_string(),
+        ),
+        Event::Shutdown => {
+            if dry {
+                ("UPS shutdown (dry run)".to_string(), "This is the point where it would shut down.".to_string())
+            } else {
+                ("Shutting down now".to_string(), "The UPS is out of runtime.".to_string())
+            }
+        }
+        Event::None => return,
+    };
+    unsafe { balloon(app, &title, &body) };
 }
 
 /// What to tell the user about a change of power state, if anything.
@@ -873,6 +937,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_SNAPSHOT => {
             unsafe { refresh(app) };
+            unsafe { check_agent(app) };
             0
         }
         WM_TEST_BALLOON => {

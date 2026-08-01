@@ -87,6 +87,18 @@ pub struct Config {
     pub max_on_battery_s: u64,
     /// A reading older than this is not evidence of anything.
     pub stale_after_s: u64,
+    /// Warn for this long before actually shutting down.
+    ///
+    /// The decision is made, announced, and only then acted on. PowerChute puts
+    /// up a modal dialog with an OK button at this moment, which is worse than
+    /// it looks: a shutdown that can be stalled by a dialog nobody is present to
+    /// dismiss means the battery decides when the machine goes down. A
+    /// notification informs without being able to block, which is the whole
+    /// difference.
+    ///
+    /// It comes out of the runtime budget, so it is not free — every second
+    /// spent warning is a second not spent shutting down.
+    pub warn_before_s: u64,
 }
 
 impl Default for Config {
@@ -100,6 +112,7 @@ impl Default for Config {
             settle_s: 30,
             max_on_battery_s: 30 * 60,
             stale_after_s: 30,
+            warn_before_s: 60,
         }
     }
 }
@@ -128,6 +141,15 @@ impl Config {
         }
         if self.max_on_battery_s < 60 {
             return Err("max_on_battery_s below a minute is not a backstop");
+        }
+        // Not bounded below: zero is a legitimate choice for a machine nobody
+        // sits at, where the warning has no one to reach and the seconds are
+        // better spent shutting down.
+        if self.warn_before_s > 600 {
+            return Err("warn_before_s above ten minutes spends the battery on a notification");
+        }
+        if self.warn_before_s >= self.runtime_threshold_s as u64 {
+            return Err("warn_before_s must leave time to shut down after the warning");
         }
         Ok(())
     }

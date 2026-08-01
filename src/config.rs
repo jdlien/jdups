@@ -60,6 +60,7 @@ impl Settings {
             format!("settle_s = {}", p.settle_s),
             format!("max_on_battery_s = {}", p.max_on_battery_s),
             format!("stale_after_s = {}", p.stale_after_s),
+            format!("warn_before_s = {}", p.warn_before_s),
         ]
     }
 }
@@ -137,6 +138,7 @@ pub fn parse(text: &str) -> Result<Settings, Vec<String>> {
             "settle_s" => num(value).map(|v| s.policy.settle_s = v),
             "max_on_battery_s" => num(value).map(|v| s.policy.max_on_battery_s = v),
             "stale_after_s" => num(value).map(|v| s.policy.stale_after_s = v),
+            "warn_before_s" => num(value).map(|v| s.policy.warn_before_s = v),
             other => Err(format!("unknown setting `{other}`")),
         };
         if let Err(e) = r {
@@ -213,6 +215,14 @@ pub const TEMPLATE: &str = r#"# jdups agent configuration.
 
 # A reading older than this is not evidence of anything.
 # stale_after_s = 30
+
+# Warn for this long before actually shutting down, so anyone at the machine
+# has a chance to save their work. The tray shows a notification; there is
+# deliberately no dialog to click, because a shutdown that can be stalled by a
+# dialog nobody is present to dismiss means the battery decides when the
+# machine goes down. Set it to 0 on a machine nobody sits at: the seconds come
+# out of the runtime budget either way.
+# warn_before_s = 60
 "#;
 
 #[cfg(test)]
