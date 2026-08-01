@@ -51,10 +51,10 @@ Be honest about these rather than assuming they work.
 
 - **`install.ps1` and `uninstall.ps1` have never been executed.** They parse
   clean and are dry-checked. That is the largest untested surface in the repo.
-- **The notification icon is measured, not seen.** `Shell_NotifyIconW` now
-  returns success with `NIIF_USER | NIIF_LARGE_ICON`, and the shell records a
-  toast each time, where before it returned 0 and recorded nothing. That the
-  gauge is *visible* on the toast is still somebody else's observation to make.
+- ~~The notification icon.~~ **Fixed and confirmed by eye.** Two icons, not
+  one: `Shell_NotifyIcon` controls the large body image, while the header icon
+  comes from the AppUserModelID registration. Registering the ID fills the
+  header; the body image is now deliberately absent.
 - **The agent has never seen an outage.** It has been run against the live UPS
   on mains, found the device, and correctly written nothing. Every path from
   `Warn` onward is covered by tests and by nothing else. The plug-pull below is
@@ -68,8 +68,8 @@ Be honest about these rather than assuming they work.
 
 1. Run `install.ps1 -PerUser` (or without, for the SYSTEM sampler and gapless
    history) and confirm both tasks register and start.
-2. Look at a toast and say whether the gauge is on it: `jdups-tray.exe --balloon`
-   (which now forwards to the running instance rather than exiting in silence).
+2. ~~Confirm the toast icon.~~ Done. `--balloon` now forwards to the running
+   instance rather than exiting in silence, so it works without stopping the tray.
 3. The tray icon sits in the Windows 11 hidden-icon overflow after any change to
    `APP_ID`, because Explorer keys visibility on app identity. Drag it out once.
 4. **Make the agent decide, on purpose, in fifteen seconds.** Put absurd
