@@ -89,15 +89,19 @@ pub struct Config {
     pub stale_after_s: u64,
     /// Warn for this long before actually shutting down.
     ///
-    /// The decision is made, announced, and only then acted on. PowerChute puts
-    /// up a modal dialog with an OK button at this moment, which is worse than
-    /// it looks: a shutdown that can be stalled by a dialog nobody is present to
-    /// dismiss means the battery decides when the machine goes down. A
-    /// notification informs without being able to block, which is the whole
-    /// difference.
+    /// The decision is made, announced, and only then acted on. PowerChute shows
+    /// a dialog at this moment; it was observed **not** to block — the shutdown
+    /// proceeded with the dialog still sitting there unclicked — so it is
+    /// informational, and the choice between it and a notification is a question
+    /// of how people actually notice things, not of correctness.
     ///
-    /// It comes out of the runtime budget, so it is not free — every second
-    /// spent warning is a second not spent shutting down.
+    /// That question is genuinely open. A dialog in the middle of the screen is
+    /// hard to miss; a notification in the corner of a 57-inch display is easy
+    /// to. What settles it for now is that a notification does not put anything
+    /// in the way of someone already hurrying to save their work.
+    ///
+    /// The warning comes out of the runtime budget, so it is not free: every
+    /// second spent warning is a second not spent shutting down.
     pub warn_before_s: u64,
 }
 

@@ -502,9 +502,12 @@ unsafe fn refresh(app: *mut App) {
 /// runs one way, which is the point.
 ///
 /// **The warning is the whole reason the grace period exists.** PowerChute shows
-/// a modal dialog with an OK button at this moment. A notification is better,
-/// and not by a little: a shutdown that can be stalled by a dialog nobody is
-/// present to dismiss means the battery decides when the machine goes down.
+/// a dialog here instead; it does not block, and the shutdown proceeds whether
+/// or not anyone clicks it. So this is a choice about how people notice things,
+/// and it is not a settled one: a dialog in the middle of the screen is hard to
+/// miss, and a notification in the corner of a very wide monitor is easy to. The
+/// case for the notification is that it does not put anything in the way of
+/// someone already hurrying to save their work.
 ///
 /// Keyed on the published sequence number rather than on the contents, so a
 /// warning fires exactly once and is never mistaken for one already given.

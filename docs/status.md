@@ -154,6 +154,27 @@ while nothing is happening cannot reveal what it does at shutdown.
 be one until the restart cycle has been demonstrated on a sacrificial load: a
 wrong write here arms a countdown on a live machine.
 
+## Open question: will anyone see the warning?
+
+The agent announces a shutdown `warn_before_s` seconds ahead and the tray shows
+a notification. PowerChute instead shows a dialog, which was observed **not** to
+block — the shutdown proceeded with it still sitting there unclicked — so both
+are informational and this is purely a question of what people notice.
+
+It is not settled. A dialog in the middle of the screen is hard to miss. A
+notification in the corner of a 57-inch ultrawide is easy to. The case for the
+notification is that it puts nothing in the way of someone already hurrying.
+
+Cheaper ways to raise it, if the notification turns out to get missed, roughly in
+order of effort:
+
+- **Put the countdown in the tray icon.** The digit rendering already exists and
+  is what the icon does when on battery; a pending shutdown could show the
+  seconds instead of the minutes, in the critical colour.
+- **Repeat the notification** at, say, 30 s and 10 s rather than once.
+- **A borderless always-on-top window** on the active monitor. Genuinely hard to
+  miss, still not blocking, and the most work by a wide margin.
+
 ## Worth not losing
 
 Two threads that live only in conversation so far.
