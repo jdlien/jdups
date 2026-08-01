@@ -45,6 +45,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAY: u32 = WM_APP + 1;
 /// The device thread has something new. Payload-free; the UI reads the snapshot.
 const WM_SNAPSHOT: u32 = WM_APP + 2;
+/// `--balloon`, forwarded to whichever instance already owns the icon.
+const WM_TEST_BALLOON: u32 = WM_APP + 3;
 
 /// `WM_USER`-based notification-icon events windows-sys doesn't surface.
 const NIN_SELECT: u32 = 0x0400;
@@ -145,6 +147,17 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         if already_running() {
+            // `--balloon` used to land here and exit 0 in silence, which reads
+            // exactly like a broken notification: the usual state of this
+            // machine is that a tray is already running. Hand the request to
+            // whoever owns the icon instead, since only that process can fire
+            // a balloon on it.
+            if test_balloon {
+                let other = FindWindowW(wide("jdups_tray").as_ptr(), core::ptr::null());
+                if !other.is_null() {
+                    PostMessageW(other, WM_TEST_BALLOON, 0, 0);
+                }
+            }
             return 0;
         }
         init_dark_mode();
@@ -377,37 +390,48 @@ unsafe fn balloon(app: *mut App, title: &str, text: &str) {
     //
     // Windows used to derive a toast's icon from the process itself, which is
     // why one appeared for free. Giving the process an AppUserModelID replaced
-    // that with an identity lookup, and an unregistered ID resolves to no icon —
+    // that with an identity lookup, and an unregistered ID resolves to no icon,
     // so setting the heading silently took the picture away.
     //
     // NIIF_USER says "use hBalloonIcon", which sidesteps the lookup entirely and
-    // is better than what was lost: the toast now carries the actual gauge,
-    // charge and colour and all, rather than a generic application icon.
+    // is better than what was lost: the toast carries the actual gauge, charge
+    // and colour and all, rather than a generic application icon.
     //
-    // Drawn larger than the tray's own: a toast has room for it, and scaling a
-    // 20 px icon up would undo the whole point of the hand-drawn font.
+    // **NIIF_LARGE_ICON means SM_CXICON at the current DPI, and nothing else.**
+    // A hardcoded 32 is correct only at 100 % scaling; at 125 % the shell wants
+    // 40 and rejects the call with ERROR_INCORRECT_SIZE. That does not merely
+    // drop the picture — `Shell_NotifyIconW` returns 0 and **no notification
+    // appears at all**. The first version of this shipped with the hardcoded 32,
+    // and cost every notification on the machine until it was measured.
+    let dpi = unsafe { icon_dpi(app) };
+    let size = unsafe { GetSystemMetricsForDpi(SM_CXICON, dpi) }.max(16);
     let snap = unsafe { (*app).monitor.as_ref().map(|m| m.snapshot()) };
-    let icon = snap.map(|s| unsafe {
-        let size = 32;
-        draw::icon(size, &draw::pixels(size, gauge_for(&s)))
-    });
+    let icon = snap
+        .map(|s| unsafe { draw::icon(size, &draw::pixels(size, gauge_for(&s))) })
+        .filter(|h| !h.is_null());
 
     unsafe {
         let nid = &mut (*app).nid;
         nid.uFlags = NIF_INFO;
         set_field(&mut nid.szInfoTitle, title);
         set_field(&mut nid.szInfo, text);
-        match icon {
-            Some(h) if !h.is_null() => {
-                nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
-                nid.hBalloonIcon = h;
-            }
-            _ => {
-                nid.dwInfoFlags = NIIF_NONE;
-                nid.hBalloonIcon = core::ptr::null_mut();
-            }
+
+        let mut shown = false;
+        if let Some(h) = icon {
+            nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+            nid.hBalloonIcon = h;
+            shown = Shell_NotifyIconW(NIM_MODIFY, nid) != 0;
         }
-        Shell_NotifyIconW(NIM_MODIFY, nid);
+
+        // The notification matters more than the picture on it. Whatever the
+        // shell dislikes about the icon, an unadorned toast that fires beats a
+        // decorated one that does not, and this is the exact failure that
+        // bug cost: silence, on the one message the program exists to deliver.
+        if !shown {
+            nid.dwInfoFlags = NIIF_NONE;
+            nid.hBalloonIcon = core::ptr::null_mut();
+            Shell_NotifyIconW(NIM_MODIFY, nid);
+        }
 
         // Freed only after the shell has been handed it. Held in App rather
         // than dropped here so the previous one outlives any in-flight toast.
@@ -723,6 +747,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_SNAPSHOT => {
             unsafe { refresh(app) };
+            0
+        }
+        WM_TEST_BALLOON => {
+            unsafe { balloon(app, "UPS Status", "Test notification.") };
             0
         }
         WM_CLOSE => {
