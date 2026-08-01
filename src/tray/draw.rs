@@ -29,6 +29,9 @@ pub enum Tint {
     Critical,
     /// Device lost, or nothing read yet. Never shown as a plausible charge.
     Unknown,
+    /// No state at all — a plain outline, for `Gauge::plain`. Distinct from
+    /// `Unknown`, which is a state and one worth noticing.
+    Plain,
 }
 
 impl Tint {
@@ -37,7 +40,7 @@ impl Tint {
             Tint::Mains => (0x3F, 0xB9, 0x50),
             Tint::Battery => (0xD2, 0x99, 0x22),
             Tint::Critical => (0xF8, 0x51, 0x49),
-            Tint::Unknown => (0x6E, 0x76, 0x81),
+            Tint::Unknown | Tint::Plain => (0x6E, 0x76, 0x81),
         }
     }
 
@@ -54,7 +57,7 @@ impl Tint {
     /// Width here is constant across every state; only the hue moves.
     fn outline(self) -> (u8, u8, u8) {
         match self {
-            Tint::Unknown => (0xC8, 0xC8, 0xC8),
+            Tint::Unknown | Tint::Plain => (0xC8, 0xC8, 0xC8),
             other => other.fill(),
         }
     }
@@ -69,6 +72,32 @@ pub struct Gauge {
     /// Digits to knock into the fill, if any. See `Reading::icon_digits`.
     pub digits: Option<u8>,
     pub tint: Tint,
+}
+
+impl Gauge {
+    /// The battery with no state on it: no fill, no digits, neutral outline.
+    ///
+    /// For the places where the icon is a *mark* rather than a readout.
+    ///
+    /// The tray icon earns its complexity — it is 20 px in a corner and has to
+    /// say everything without words. A toast does not: it is already saying the
+    /// state in a sentence, at a size you cannot miss, so a gauge beside it
+    /// repeats what the text just said.
+    ///
+    /// And it repeats it badly. The digit fonts here are hand-drawn *per size*
+    /// precisely because bitmap type does not scale, and the largest set is
+    /// 8x13. `SM_CXICON` is 40 px at 125 % scaling, which is off the end of that
+    /// table — so the toast was getting exactly the "diagram of a digit" render
+    /// those tables exist to avoid. The fix is not a fifth font drawn for a
+    /// surface that does not need numbers; it is to stop putting numbers there.
+    ///
+    /// Deliberately not `Tint::Unknown`. That renders identically today, but it
+    /// *means* "the device is not talking" — and a toast firing with the
+    /// device-lost colour would be a lie the day someone changes what Unknown
+    /// looks like.
+    pub fn plain() -> Gauge {
+        Gauge { charge: None, digits: None, tint: Tint::Plain }
+    }
 }
 
 /// The unfilled interior. **Opaque**, deliberately: alpha means "composites
@@ -1424,6 +1453,9 @@ what each icon size uses:");
             ("crit 20/2m", g(Some(20), Some(2), Tint::Critical)),
             ("crit 0/0m", g(Some(0), Some(0), Tint::Critical)),
             ("unknown", g(None, None, Tint::Unknown)),
+            // What a toast carries. Included at every size so the 40 px column
+            // shows the surface this was actually drawn for.
+            ("plain (toast)", Gauge::plain()),
         ];
         // Both shapes, so the choice is made by looking rather than arguing.
         let rows: Vec<(bool, i32)> = [true, false]

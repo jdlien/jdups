@@ -393,9 +393,7 @@ unsafe fn balloon(app: *mut App, title: &str, text: &str) {
     // that with an identity lookup, and an unregistered ID resolves to no icon,
     // so setting the heading silently took the picture away.
     //
-    // NIIF_USER says "use hBalloonIcon", which sidesteps the lookup entirely and
-    // is better than what was lost: the toast carries the actual gauge, charge
-    // and colour and all, rather than a generic application icon.
+    // NIIF_USER says "use hBalloonIcon", which sidesteps the lookup entirely.
     //
     // **NIIF_LARGE_ICON means SM_CXICON at the current DPI, and nothing else.**
     // A hardcoded 32 is correct only at 100 % scaling; at 125 % the shell wants
@@ -403,11 +401,19 @@ unsafe fn balloon(app: *mut App, title: &str, text: &str) {
     // drop the picture — `Shell_NotifyIconW` returns 0 and **no notification
     // appears at all**. The first version of this shipped with the hardcoded 32,
     // and cost every notification on the machine until it was measured.
+    //
+    // The icon is the plain battery, not the live gauge. Putting the real gauge
+    // here looked like the better idea and wasn't: at 40 px the hand-drawn digit
+    // sets have run out — the largest is 8x13 — so the number rendered as a
+    // scaled-up diagram of itself, which is the exact failure those per-size
+    // tables exist to prevent. It was also redundant, since the toast says the
+    // state in words directly beside it. See `Gauge::plain`.
+    //
+    // It no longer depends on a snapshot, so a toast can carry its icon even
+    // when the device is the thing that went missing.
     let dpi = unsafe { icon_dpi(app) };
     let size = unsafe { GetSystemMetricsForDpi(SM_CXICON, dpi) }.max(16);
-    let snap = unsafe { (*app).monitor.as_ref().map(|m| m.snapshot()) };
-    let icon = snap
-        .map(|s| unsafe { draw::icon(size, &draw::pixels(size, gauge_for(&s))) })
+    let icon = Some(unsafe { draw::icon(size, &draw::pixels(size, draw::Gauge::plain())) })
         .filter(|h| !h.is_null());
 
     unsafe {
