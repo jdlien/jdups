@@ -1140,6 +1140,29 @@ Every writable report named below was confirmed present in a `--probe` walk.
 | Transfer voltage, sensitivity | reads them | `0084:53` / `0084:54`, reports 50 and 51 |
 | Battery replacement warning | shows the install date | `NeedReplacement` `0085:48` is **not in the caps at all**, so PowerChute cannot be reading it either — it is computing from the date, and so can this |
 
+**`DelayBeforeShutdown` is settled, from the vendor's own UI.** PowerChute's
+Shutdown Settings page carries a summary that states the contract outright:
+
+> After **0 Seconds** — Operating System Shutdown starts
+> After **120 Seconds** — Outlet Group ... powering the PowerChute Agent turns off
+
+...where 120 is the value of its "Time for operating system to shut down" field.
+So the sequence is: arm report 21 with the number of seconds the OS is allowed,
+*then* begin the shutdown, and the UPS cuts output when the countdown expires.
+That is exactly the ordering the transaction below specifies, arrived at
+independently, which is a good sign for both.
+
+It also fixes the sizing question. The delay is not a guess to be tuned; it is
+"how long this machine takes to shut down, plus the hibernation file write",
+and PowerChute's own default for it here is 120 s.
+
+**No restart delay appears anywhere in that UI.** PowerChute exposes shutdown
+timing, OS shutdown type, and a command file, and nothing about coming back. An
+implementation that has restarted this machine for years without exposing the
+setting is unlikely to be writing it, which is real evidence — the negative
+kind — that report 65 is not part of the handshake and the UPS restores output
+by itself when mains returns.
+
 **The unknown is the restart handshake, and only that.** `DelayBeforeStartup`
 (`0084:56`) does not exist on this device; neither does `DelayBeforeReboot`
 (`0084:55`). What does exist is report 65, `FF86:7D`, an APC-vendor value whose
