@@ -1,0 +1,55 @@
+[package]
+name = "jdups"
+version = "0.1.0"
+edition = "2021"
+description = "A tray readout for an APC Back-UPS RS 1500MS2: charge, runtime, load, voltages"
+
+[lib]
+name = "jdups"
+path = "src/lib.rs"
+
+# Two binaries because a PE has exactly one subsystem. The CLI must be a console
+# app — a windows-subsystem process gets no stdout from the calling shell, and
+# the shell does not wait for it, so `$LASTEXITCODE` comes back empty and
+# `--probe`'s non-zero exit (its whole safety signal) is lost. The plan had this
+# as one binary on the reasoning that there was no CLI worth preserving; there
+# is now, so this follows jdrgb instead. They share everything via the lib.
+[[bin]]
+name = "jdups"
+path = "src/main.rs"
+
+[[bin]]
+name = "jdups-tray"
+path = "src/tray/main.rs"
+
+# One dependency. See docs/implementation-plan.md, "Dependencies" — hidapi was
+# dropped deliberately: it has no bounded feature I/O, hides the preparsed data
+# that PresentStatus decoding needs, and silently falls back to an access-0
+# handle that cannot ReadFile.
+[dependencies]
+windows-sys = { version = "0.61", features = [
+    # --- device layer -----------------------------------------------------
+    "Win32_Foundation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    # --- tray (Phase 2-4) -------------------------------------------------
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
