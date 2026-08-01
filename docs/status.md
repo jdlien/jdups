@@ -49,8 +49,16 @@ Not asserted, measured. The plug-pull capture is `docs/plug-pull.txt`.
 
 Be honest about these rather than assuming they work.
 
-- **`install.ps1` and `uninstall.ps1` have never been executed.** They parse
-  clean and are dry-checked. That is the largest untested surface in the repo.
+- **`uninstall.ps1` has never been executed.** `install.ps1` now has, machine-wide
+  with `-Agent`: three tasks, the ACL applied with inheritance off, both SYSTEM
+  processes up and both logs writing. The removal path is still unproven.
+
+  One thing that install verification has to account for: an unelevated
+  `Get-ScheduledTask` **silently omits** `jdups-sampler` and `jdups-agent`. A
+  task registered with a SYSTEM principal gets a task-file ACL that excludes
+  ordinary users, so the query returns only `jdups-tray` and looks like a
+  half-finished install. `Test-Path` on the task file answering *access denied*
+  rather than *false* is what tells them apart.
 - ~~The notification icon.~~ **Fixed and confirmed by eye.** Two icons, not
   one: `Shell_NotifyIcon` controls the large body image, while the header icon
   comes from the AppUserModelID registration. Registering the ID fills the
@@ -66,8 +74,10 @@ Be honest about these rather than assuming they work.
 
 **Needs the machine, not the developer:**
 
-1. Run `install.ps1 -PerUser` (or without, for the SYSTEM sampler and gapless
-   history) and confirm both tasks register and start.
+1. ~~Run the installer.~~ Done, machine-wide with `-Agent`. Note that a tray
+   running from `target\release` holds a `Local\` singleton mutex, so the
+   installed copy exits 0 in silence and the install looks like it did nothing.
+   Stop the dev one before installing, and before iterating afterwards.
 2. ~~Confirm the toast icon.~~ Done. `--balloon` now forwards to the running
    instance rather than exiting in silence, so it works without stopping the tray.
 3. The tray icon sits in the Windows 11 hidden-icon overflow after any change to
