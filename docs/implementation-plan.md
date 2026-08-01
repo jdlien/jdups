@@ -802,6 +802,34 @@ following a path a normal user can influence is an elevation-of-privilege bug.
 
 ## Phase 7 — install
 
+**Elevation is about the install shape, not the program.** Nothing jdups does at
+runtime needs administrator rights — it reads HID feature reports and draws an
+icon. What needs elevation is Program Files, a shared log directory a SYSTEM
+writer can be trusted with, and a task that runs before anyone signs in.
+
+So `install.ps1` has two modes:
+
+| | machine-wide | `-PerUser` |
+|---|---|---|
+| Elevation | yes | **none** |
+| Binaries | `%ProgramFiles%\jdups` | `%LOCALAPPDATA%\Programs\jdups` |
+| Log | `%ProgramData%\jdups`, explicit ACL | `%LOCALAPPDATA%\jdups` |
+| Tray | logon task, as you | identical |
+| Sampler | **SYSTEM, at startup** | as you, at logon |
+
+The only thing `-PerUser` gives up is continuity: its sampler runs at logon, so
+the log gains a gap whenever nobody is signed in. For "how bad is my power" that
+is usually fine — the machine is on when you care. The runtime-decay series is
+what suffers, so the installer says so rather than burying it.
+
+`-TrayOnly` implies `-PerUser`, because a tray-only install touches nothing
+outside the profile and asking for a UAC prompt would be theatre.
+
+Rejected for the per-user sampler: a "run whether logged on or not" task, which
+would close the gap without elevation but requires storing the user's password.
+An honest hole in the data is the better trade.
+
+
 Model on jdrgb's `install.ps1`. Install to `%ProgramFiles%\jdups`, admin-only
 writable by design.
 
