@@ -873,7 +873,37 @@ notifications, and both matter here. As a service it can:
 If the agent is installed, it can also subsume the sampler — it already holds the
 stream continuously. Worth doing then, not before.
 
-### The decision is a pure function — but it is not where most of the risk is
+### The decision is a pure function — **built**
+
+`src/policy.rs`, with 15 tests. Nothing in it acts: no device writes, no
+`InitiateSystemShutdownExW`, no clock, no I/O. It folds observations into a
+decision, which means the state space can be walked exhaustively long before
+anything is wired up to obey it.
+
+What the hardware findings forced into its shape:
+
+- **A settle window** after mains is lost, during which thresholds are ignored.
+  The charge model collapses on transfer and corrects itself over the following
+  minutes, so acting inside it means acting on a number that is about to be
+  wrong.
+- **Latched outage state.** Silence never clears it; only a *freshly confirmed*
+  mains return, sustained past the debounce, does. A brief flicker cannot reset
+  the clock.
+- **Asymmetric staleness.** Before an outage, unknown means do nothing. During
+  one, losing the device is not permission to relax — that is exactly the case
+  where doing nothing runs the battery flat.
+- **A hard deadline** that is checked *before* staleness, so a device that goes
+  quiet mid-outage still gets shut down rather than riding to exhaustion.
+- **`ShutdownImminent` bypasses everything**, including the settle window.
+- **Thresholds are OR, not AND.** Requiring both to agree fails open whenever
+  one is unreadable.
+- **`saturating_sub` throughout**, so a clock going backwards cannot manufacture
+  an elapsed deadline. There is a test that drives time in reverse.
+- **`Config::validate`** refuses values that would make the agent dangerous,
+  because a SYSTEM process that accepts any threshold it finds in a file is
+  shutdown-as-a-service.
+
+### It is not where most of the risk is
 
 ```rust
 pub fn decide(state: &State, history: &History, cfg: &Config) -> Action

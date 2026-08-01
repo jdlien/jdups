@@ -7,3 +7,4 @@ pub mod decode;
 pub mod hid;
 pub mod logfile;
 pub mod model;
+pub mod policy;
