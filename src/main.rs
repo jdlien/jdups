@@ -25,6 +25,8 @@ USAGE:
     --list           List every HID collection present, and which one we'd pick
     --log            Print the path of the log the tray would open
     --serial SERIAL  Select a specific unit when more than one is attached
+    --read ID[,ID]   Read feature reports by number, raw and decoded. Read-only:
+                     it never writes, so it is safe against a live UPS
 
     --sample         Log to CSV continuously. This is the headless logger the
                      scheduled task runs; it is the only writer of the log.
@@ -43,6 +45,7 @@ fn main() {
     let mut interval: Option<u64> = None;
     let mut dir: Option<std::path::PathBuf> = None;
     let mut verbose = false;
+    let mut read_ids: Vec<u8> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -59,6 +62,14 @@ fn main() {
                 i += 1;
             }
             "--probe" => mode = "probe",
+            "--read" => {
+                mode = "read";
+                read_ids = args
+                    .get(i + 1)
+                    .map(|v| v.split(',').filter_map(|s| s.trim().parse::<u8>().ok()).collect())
+                    .unwrap_or_default();
+                i += 1;
+            }
             "--list" => mode = "list",
             "--log" => mode = "log",
             "--watch" => {
@@ -104,6 +115,7 @@ fn main() {
         },
         "list" => cmd_list(),
         "sample" => cmd_sample(serial, interval, dir, verbose),
+        "read" => run_read(serial.as_deref(), &read_ids),
         _ => run(mode, serial.as_deref(), watch_secs),
     };
     std::process::exit(code);
@@ -173,6 +185,79 @@ fn ctrl_c_handler<F: Fn() + Send + 'static>(f: F) -> Result<(), ()> {
         }
     }
     Ok(())
+}
+
+/// Read named feature reports and print them raw.
+///
+/// For the reports whose meaning is not yet settled — the APC-vendor pair 64 and
+/// 65 above all, which are the restart-handshake hypothesis. PowerChute is a
+/// working implementation of the thing being reverse-engineered, and while it is
+/// still installed and armed, whatever it has configured is sitting in these
+/// registers. Reading them costs nothing and risks nothing.
+///
+/// **Read-only, deliberately.** There is no `--write` and there should not be
+/// one until the restart cycle has been demonstrated on a load nobody minds
+/// losing. A wrong write here arms a countdown on a live machine.
+fn run_read(serial: Option<&str>, ids: &[u8]) -> i32 {
+    if ids.is_empty() {
+        eprintln!("jdups: --read needs at least one report number, e.g. --read 21,64,65");
+        return 2;
+    }
+    let dev = match hid::open(serial) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("jdups: {e}");
+            return 1;
+        }
+    };
+
+    println!("id   bytes                 u8    u16      i16     meaning");
+    let mut failed = 0;
+    for &id in ids {
+        match dev.feature(id) {
+            Ok(buf) => {
+                let hex: Vec<String> = buf.iter().map(|b| format!("{b:02X}")).collect();
+                let p = &buf[1..];
+                let u8v = p.first().copied().unwrap_or(0);
+                let u16v = if p.len() >= 2 {
+                    u16::from_le_bytes([p[0], p[1]])
+                } else {
+                    u8v as u16
+                };
+                println!(
+                    "{id:<4} {:<21} {u8v:<5} {u16v:<8} {:<7} {}",
+                    hex.join(" "),
+                    u16v as i16,
+                    known(id),
+                );
+            }
+            Err(e) => {
+                println!("{id:<4} unreadable: {e}");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// What the descriptor calls a report, where it names it at all.
+fn known(id: u8) -> &'static str {
+    match id {
+        report::DELAY_BEFORE_SHUTDOWN => "DelayBeforeShutdown (0084:57), -1 = none scheduled",
+        66 => "DelayBeforeShutdown again (0084:57)",
+        64 => "APC FF86:7C, 0..1 - restart-handshake hypothesis",
+        65 => "APC FF86:7D, -1..32767 - same shape as DelayBeforeShutdown",
+        33 => "Test (0084:58), 0..6",
+        24 | 120 => "AudibleAlarmControl (0084:5A), 1..3",
+        17 => "RemainingCapacityLimit (0085:29), 1..100",
+        50 => "LowVoltageTransfer (0084:53)",
+        51 => "HighVoltageTransfer (0084:54)",
+        _ => "",
+    }
 }
 
 fn cmd_list() -> i32 {

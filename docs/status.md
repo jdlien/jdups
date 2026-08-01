@@ -116,15 +116,50 @@ argument; the short version, with the first rung now done:
 2. The shutdown **transaction** with a persisted intent record, ordered so the
    OS commits before the UPS is armed. `SE_SHUTDOWN_NAME` must be explicitly
    enabled and `AdjustTokenPrivileges` checked for `ERROR_NOT_ALL_ASSIGNED`.
-3. **The restart handshake is the real unknown.** `DelayBeforeStartup` does not
-   exist on this device. Reports 64/65 (`FF86:7C`, `FF86:7D`) have the right
-   shape but that is a hypothesis. Confirm against NUT's `apc-hid.c` and prove
-   the full shutdown → mains-return → restart cycle **on a sacrificial load**,
-   never this machine.
+3. **The restart handshake is the real unknown, so do it first.** The transaction
+   above has no unknowns and will take the same shape whenever it is written;
+   this is the only thing that could change the *design*, and it needs hardware
+   and a load nobody minds losing. Learn it before building on it.
+
+   `DelayBeforeStartup` (`0084:56`) does not exist on this device, nor does
+   `DelayBeforeReboot`. The hypothesis is report 65, `FF86:7D`. Measured
+   support, as of 2026-08-01: its range is `-1..32767`, **identical** to
+   `DelayBeforeShutdown`, and it currently reads **-1**, the same idle value.
+   A register whose unset state is -1 is a delay with a cancel, not a counter
+   and not a flag. Report 64 (`FF86:7C`) is a companion boolean reading 0.
+
+   **The cheap experiment, before any write:** PowerChute is a working
+   implementation of exactly this, still installed and armed. The agent now
+   logs reports 21/64/65 whenever they move, so a PowerChute-initiated shutdown
+   records what the vendor writes, in our log, with no write of our own. If it
+   touches 65, the hypothesis is confirmed by observation rather than by
+   experiment. Confirm against NUT's `apc-hid.c` as well, then prove the full
+   shutdown → mains-return → restart cycle **on a sacrificial load**.
 4. Dry-run for weeks. Absurd thresholds to test the trigger cheaply. Only then
    realistic ones, and only then disarm PowerChute.
 
 **Until the agent is proven, PowerChute stays installed and armed.**
+
+## The device's current settings
+
+Read 2026-08-01 with `jdups --read`, while PowerChute was installed and armed.
+Everything is at idle or factory default, so PowerChute maintains **no** standing
+configuration in these registers — which is itself the finding: reading them
+while nothing is happening cannot reveal what it does at shutdown.
+
+| Report | Reads | |
+|---|---|---|
+| 21, 66 | `-1` | `DelayBeforeShutdown`. No countdown scheduled |
+| 64 | `0` | `FF86:7C`, boolean |
+| 65 | `-1` | `FF86:7D`. Idles exactly like report 21 |
+| 33 | `6` | `Test` = "none". No self-test result stored |
+| 24, 120 | `1` | `AudibleAlarmControl` = disabled |
+| 17 | `10` | `RemainingCapacityLimit`, the UPS's own low-battery point |
+| 50, 51 | `88`, `144` | Transfer voltages |
+
+`--read` is read-only and there is deliberately no `--write`. There should not
+be one until the restart cycle has been demonstrated on a sacrificial load: a
+wrong write here arms a countdown on a live machine.
 
 ## Worth not losing
 
