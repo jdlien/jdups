@@ -37,8 +37,8 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::Shell::{
     SetCurrentProcessExplicitAppUserModelID, ShellExecuteW, Shell_NotifyIconGetRect,
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE,
-    NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW,
-    NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
+    NIF_SHOWTIP, NIF_TIP, NIIF_LARGE_ICON, NIIF_NONE, NIIF_USER, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -68,6 +68,8 @@ struct App {
     /// state only, so dragging the taskbar to a different-DPI monitor keeps the
     /// old bitmap; the same bug would land here by inheritance.
     icon_key: Option<(draw::Gauge, u32)>,
+    /// Kept alive past the Shell_NotifyIcon call that hands it over.
+    balloon_icon: HICON,
     taskbar_created: u32,
     monitor: Option<device::Monitor>,
     last_power: Option<Power>,
@@ -157,6 +159,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             nid: core::mem::zeroed(),
             icon: core::ptr::null_mut(),
             icon_key: None,
+            balloon_icon: core::ptr::null_mut(),
             taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             monitor: None,
             last_power: None,
@@ -186,6 +189,9 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
         Shell_NotifyIconW(NIM_DELETE, &(*app).nid);
         if !(*app).icon.is_null() {
             DestroyIcon((*app).icon);
+        }
+        if !(*app).balloon_icon.is_null() {
+            DestroyIcon((*app).balloon_icon);
         }
         drop(Box::from_raw(app));
         0
@@ -367,12 +373,49 @@ fn tooltip(s: &Snapshot) -> String {
 }
 
 unsafe fn balloon(app: *mut App, title: &str, text: &str) {
+    // Supply the icon explicitly.
+    //
+    // Windows used to derive a toast's icon from the process itself, which is
+    // why one appeared for free. Giving the process an AppUserModelID replaced
+    // that with an identity lookup, and an unregistered ID resolves to no icon —
+    // so setting the heading silently took the picture away.
+    //
+    // NIIF_USER says "use hBalloonIcon", which sidesteps the lookup entirely and
+    // is better than what was lost: the toast now carries the actual gauge,
+    // charge and colour and all, rather than a generic application icon.
+    //
+    // Drawn larger than the tray's own: a toast has room for it, and scaling a
+    // 20 px icon up would undo the whole point of the hand-drawn font.
+    let snap = unsafe { (*app).monitor.as_ref().map(|m| m.snapshot()) };
+    let icon = snap.map(|s| unsafe {
+        let size = 32;
+        draw::icon(size, &draw::pixels(size, gauge_for(&s)))
+    });
+
     unsafe {
         let nid = &mut (*app).nid;
         nid.uFlags = NIF_INFO;
         set_field(&mut nid.szInfoTitle, title);
         set_field(&mut nid.szInfo, text);
+        match icon {
+            Some(h) if !h.is_null() => {
+                nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+                nid.hBalloonIcon = h;
+            }
+            _ => {
+                nid.dwInfoFlags = NIIF_NONE;
+                nid.hBalloonIcon = core::ptr::null_mut();
+            }
+        }
         Shell_NotifyIconW(NIM_MODIFY, nid);
+
+        // Freed only after the shell has been handed it. Held in App rather
+        // than dropped here so the previous one outlives any in-flight toast.
+        let old = (*app).balloon_icon;
+        (*app).balloon_icon = icon.unwrap_or(core::ptr::null_mut());
+        if !old.is_null() {
+            DestroyIcon(old);
+        }
     }
 }
 
