@@ -22,6 +22,14 @@ path = "src/main.rs"
 name = "jdups-tray"
 path = "src/tray/main.rs"
 
+# The shutdown agent. A console binary for the same reason jdups.exe is: while
+# this is being proven, its exit code and stderr are the whole interface. It
+# becomes a service in the next phase, which is what buys preshutdown
+# notification and knowing when the machine suspends.
+[[bin]]
+name = "jdups-agent"
+path = "src/agent/main.rs"
+
 # One dependency. See docs/implementation-plan.md, "Dependencies" — hidapi was
 # dropped deliberately: it has no bounded feature I/O, hides the preparsed data
 # that PresentStatus decoding needs, and silently falls back to an access-0

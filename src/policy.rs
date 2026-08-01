@@ -30,11 +30,46 @@ pub enum Action {
     Nothing,
     /// On battery, not yet at the point of shutting down. Worth telling someone.
     Warn,
-    /// Shut the machine down now.
-    Shutdown,
+    /// Shut the machine down now, and the reason it decided that.
+    Shutdown(Why),
 }
 
-#[derive(Debug, Clone, Copy)]
+impl Action {
+    pub fn is_shutdown(self) -> bool {
+        matches!(self, Action::Shutdown(_))
+    }
+}
+
+/// Which of the four independent routes to a shutdown was taken.
+///
+/// Carried out of the decision rather than reconstructed by the caller. A dry
+/// run whose log says *that* it would have shut down but not *why* cannot be
+/// used to tune the thresholds, and a caller that re-derives the reason from the
+/// same observation is free to disagree with the decision it is describing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// The device raised `ShutdownImminent`. It is about to cut its own output.
+    DeviceImminent,
+    /// On battery longer than the configured maximum, whatever the numbers say.
+    Backstop,
+    /// Predicted runtime at or below the threshold, held past the debounce.
+    Runtime,
+    /// Charge at or below the floor, held past the debounce.
+    Charge,
+}
+
+impl Why {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Why::DeviceImminent => "the UPS says shutdown is imminent",
+            Why::Backstop => "on battery past the maximum",
+            Why::Runtime => "predicted runtime below the threshold",
+            Why::Charge => "charge below the floor",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Shut down at or below this much predicted runtime.
     pub runtime_threshold_s: u16,
@@ -134,6 +169,14 @@ impl State {
         self.outage_since.is_some()
     }
 
+    /// How long the current outage has been latched, or `None` on mains.
+    ///
+    /// For the log, not for the decision: "would have shut down 4 minutes into
+    /// the outage" is the sentence that makes a dry run worth reading.
+    pub fn on_battery_for(&self, now_s: u64) -> Option<u64> {
+        self.outage_since.map(|t| now_s.saturating_sub(t))
+    }
+
     /// Fold in one observation and say what to do.
     pub fn observe(&mut self, o: &Observation, cfg: &Config) -> Action {
         if o.fresh {
@@ -163,7 +206,7 @@ impl State {
         // gated on the settle window: it is the UPS telling us it is about to
         // cut output, and there is nothing to second-guess it with.
         if o.fresh && o.shutdown_imminent {
-            return Action::Shutdown;
+            return Action::Shutdown(Why::DeviceImminent);
         }
 
         let Some(outage_since) = self.outage_since else {
@@ -180,7 +223,7 @@ impl State {
         // *during* an outage, the deadline is the only thing left, and it must
         // still fire.
         if on_battery_for >= cfg.max_on_battery_s {
-            return Action::Shutdown;
+            return Action::Shutdown(Why::Backstop);
         }
 
         // --- staleness, which is asymmetric -----------------------------
@@ -205,17 +248,27 @@ impl State {
         // --- the thresholds ---------------------------------------------
         // OR, not AND. Requiring both to agree fails *open* — the dangerous
         // direction — whenever one of them is unreadable.
-        let qualifies = o.runtime_s.is_some_and(|r| r <= cfg.runtime_threshold_s)
-            || o.charge.is_some_and(|c| c <= cfg.charge_floor_pct);
+        //
+        // Runtime is named first when both qualify, because it is the primary
+        // trigger: it folds the current load in and the device computes it,
+        // which is the whole argument for writing an agent at all. The log
+        // prints both numbers regardless, so nothing is hidden by the choice.
+        let why = if o.runtime_s.is_some_and(|r| r <= cfg.runtime_threshold_s) {
+            Some(Why::Runtime)
+        } else if o.charge.is_some_and(|c| c <= cfg.charge_floor_pct) {
+            Some(Why::Charge)
+        } else {
+            None
+        };
 
-        if !qualifies {
+        let Some(why) = why else {
             self.qualifying_since = None;
             return Action::Warn;
-        }
+        };
 
         let since = *self.qualifying_since.get_or_insert(o.now_s);
         if o.now_s.saturating_sub(since) >= cfg.debounce_s {
-            Action::Shutdown
+            Action::Shutdown(why)
         } else {
             Action::Warn
         }
@@ -307,7 +360,7 @@ mod tests {
             shutdown_imminent: true,
             ..battery(1, 100, 2600)
         };
-        assert_eq!(s.observe(&o, &cfg()), Action::Shutdown);
+        assert_eq!(s.observe(&o, &cfg()), Action::Shutdown(Why::DeviceImminent));
     }
 
     /// The transfer sag: charge collapses ~20 points within seconds of losing
@@ -339,22 +392,28 @@ mod tests {
         for t in outage_at..fires_at {
             assert_eq!(s.observe(&battery(t, 80, 120), &c), Action::Warn, "at t={t}");
         }
-        assert_eq!(s.observe(&battery(fires_at, 80, 120), &c), Action::Shutdown);
+        assert_eq!(s.observe(&battery(fires_at, 80, 120), &c), Action::Shutdown(Why::Runtime));
     }
 
     /// Either threshold alone is enough. Requiring both to agree fails open
     /// whenever one of them is unreadable, which is the dangerous direction.
+    ///
+    /// Also pins which reason each route reports, so the dry-run log cannot
+    /// start attributing a charge trigger to runtime without a test noticing.
     #[test]
     fn the_thresholds_are_or_not_and() {
         let c = cfg();
-        for (charge, runtime) in [(80u8, 120u16), (10, 2600)] {
+        for (charge, runtime, why) in [
+            (80u8, 120u16, Why::Runtime),
+            (10, 2600, Why::Charge),
+        ] {
             let mut s = State::new();
             s.observe(&mains(0), &c);
             let mut last = Action::Nothing;
             for t in 1..=1 + c.settle_s + c.debounce_s {
                 last = s.observe(&battery(t, charge, runtime), &c);
             }
-            assert_eq!(last, Action::Shutdown, "charge {charge} runtime {runtime}");
+            assert_eq!(last, Action::Shutdown(why), "charge {charge} runtime {runtime}");
         }
     }
 
@@ -406,7 +465,7 @@ mod tests {
             &Observation { fresh: false, ..battery(1 + c.max_on_battery_s, 90, 2000) },
             &c,
         );
-        assert_eq!(a, Action::Shutdown);
+        assert_eq!(a, Action::Shutdown(Why::Backstop));
     }
 
     /// Mains coming back has to be believed for a while. A flapping supply that
@@ -495,9 +554,8 @@ mod tests {
                         runtime_s: Some(runtime),
                         ..mains(t)
                     };
-                    assert_ne!(
-                        s.observe(&o, &c),
-                        Action::Shutdown,
+                    assert!(
+                        !s.observe(&o, &c).is_shutdown(),
                         "shut down on mains at charge {charge} runtime {runtime}"
                     );
                 }
@@ -517,7 +575,7 @@ mod tests {
         // Every subsequent observation claims an earlier instant.
         for t in (0..1000).rev() {
             let a = s.observe(&battery(t, 10, 60), &c);
-            assert_ne!(a, Action::Shutdown, "shut down on a backwards clock at t={t}");
+            assert!(!a.is_shutdown(), "shut down on a backwards clock at t={t}");
         }
     }
 }

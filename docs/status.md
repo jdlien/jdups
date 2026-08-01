@@ -5,22 +5,27 @@ context boundary — [implementation-plan.md](implementation-plan.md) carries th
 reasoning and the hardware map, so this is deliberately short and points there
 rather than repeating it.
 
-Last updated: 2026-08-01, 13 commits in.
+Last updated: 2026-08-01, 14 commits in.
 
 ## Built
 
-Phases 1–7 of the plan. Two binaries over one lib, one dependency
-(`windows-sys`), 100 tests, clippy clean, working tree clean.
+Phases 1–7 of the plan, and the first rung of Phase 8. Three binaries over one
+lib, one dependency (`windows-sys`), 127 tests, clippy clean.
 
 | | |
 |---|---|
 | `jdups.exe` | `--once` `--watch` `--probe` `--list` `--log` `--sample` |
 | `jdups-tray.exe` | notification icon, menu, notifications; `--balloon` to fire a test one |
-| `install.ps1` | machine-wide, or `-PerUser` with no elevation |
+| `jdups-agent.exe` | **dry run**: decides and logs, cannot act. `--check` `--print-config` |
+| `install.ps1` | machine-wide, or `-PerUser` with no elevation; `-Agent` for the dry run |
 | `uninstall.ps1` | only elevates if a machine-wide install is present |
 
-Phase 8's decision logic exists in `src/policy.rs` — pure, 15 tests, **inert**.
-Nothing calls it, nothing can act on it.
+The agent is deliberately half a feature. `policy.rs` decides, `config.rs`
+guards the thresholds, `agent/journal.rs` decides what gets written and
+`agent/watch.rs` drives the device. **`armed = true` is refused at startup** —
+the shutdown transaction is a separate change with its own testing ladder, and
+shipping both at once would mean the first run of the transaction is also its
+first test.
 
 ## Proven against the hardware
 
@@ -49,7 +54,12 @@ Be honest about these rather than assuming they work.
 - **The notification icon fix is not visually confirmed.** `NIIF_USER` +
   `hBalloonIcon` should put the gauge in the toast; the toast lands on a monitor
   that could not be sampled. Check with `jdups-tray.exe --balloon`.
-- Phase 8 beyond `policy.rs` — nothing else exists.
+- **The agent has never seen an outage.** It has been run against the live UPS
+  on mains, found the device, and correctly written nothing. Every path from
+  `Warn` onward is covered by tests and by nothing else. The plug-pull below is
+  what settles it.
+- Everything in Phase 8 past the decision: the service, the transaction, the
+  restart handshake.
 
 ## Next
 
@@ -60,13 +70,37 @@ Be honest about these rather than assuming they work.
 2. Confirm the toast icon with `--balloon`.
 3. The tray icon sits in the Windows 11 hidden-icon overflow after any change to
    `APP_ID`, because Explorer keys visibility on app identity. Drag it out once.
+4. **Make the agent decide, on purpose, in fifteen seconds.** Put absurd
+   thresholds in a config and pull the plug. Nothing can act on the decision, so
+   this costs a few seconds of battery and proves the whole path from device to
+   log entry:
+
+   ```
+   runtime_threshold_s = 3600     # always qualifies
+   settle_s = 10                  # the minimum validate() allows
+   debounce_s = 5                 # likewise
+   ```
+
+   ```powershell
+   .\target\release\jdups-agent.exe --config .\test.conf --dir .
+   ```
+
+   Expect an `on battery:` line immediately, then an `ACT` line reading
+   `would shut down now: predicted runtime below the threshold` about fifteen
+   seconds later. If the reason or the timing is wrong, that is worth knowing
+   before anything is ever allowed to act on it.
 
 **Phase 8, and only in this order.** See the plan's Phase 8 for the full
-argument; the short version:
+argument; the short version, with the first rung now done:
 
+0. ~~The decision, wired to the device, in dry run.~~ **Built.** Run it for
+   weeks before touching anything below, and tune `jdups.conf` from what it
+   says. A threshold chosen from a month of this machine's own power is worth
+   more than every other item on this list.
 1. `jdups-agent.exe` as a **Windows service**, not a scheduled task — a task
    cannot receive `SERVICE_CONTROL_PRESHUTDOWN` or power notifications, and
-   sleep/hibernate/Fast Startup are otherwise unhandled.
+   sleep/hibernate/Fast Startup are otherwise unhandled. The dry run is a
+   scheduled task today, which is fine precisely because it cannot act.
 2. The shutdown **transaction** with a persisted intent record, ordered so the
    OS commits before the UPS is armed. `SE_SHUTDOWN_NAME` must be explicitly
    enabled and `AdjustTokenPrivileges` checked for `ERROR_NOT_ALL_ASSIGNED`.

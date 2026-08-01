@@ -31,11 +31,15 @@ same numbers straight off the device.
   `--list` to see what is attached.
 - **`jdups.exe --sample`** — a headless logger writing monthly CSV, medians per
   interval, transitions closing the window early.
-- **`install.ps1`** — registers both as scheduled tasks. `-PerUser` installs
-  inside your profile with no elevation at all.
+- **`jdups-agent.exe`** — the shutdown agent, **in dry run**. It watches the
+  UPS, decides whether this machine should shut down, and writes what it *would*
+  have done. It cannot act: `armed = true` is refused at startup, because the
+  shutdown transaction is not written yet. Thresholds picked on a bench are
+  guesses; weeks of decisions against your own power are not.
+- **`install.ps1`** — registers them as scheduled tasks. `-PerUser` installs
+  inside your profile with no elevation at all; `-Agent` adds the dry run.
 
-Not yet: the graceful-shutdown agent. Its decision logic exists and is tested
-(`src/policy.rs`), but nothing is wired up to act on it.
+Not yet: anything that actually shuts the machine down.
 
 ## Build
 

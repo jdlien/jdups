@@ -9,6 +9,10 @@
       jdups-tray     at logon, as you, limited rights. The notification icon.
       jdups-sampler  the logger, which is why history survives a logoff.
 
+    With -Agent, a third task runs the shutdown agent in dry run. See that
+    parameter: it cannot shut anything down, and is not a replacement for
+    PowerChute.
+
     Nothing jdups does at runtime needs administrator rights -- it only reads
     HID feature reports. Elevation is for the *install shape*, not the program:
     Program Files, a shared log directory that a SYSTEM writer can be trusted
@@ -34,6 +38,21 @@
     decay series is the one that suffers, so it is called out rather than
     buried.
 
+.PARAMETER Agent
+    Also register the shutdown agent, in dry run.
+
+    The agent watches the UPS, decides whether this machine should shut down,
+    and writes what it *would* have done to jdups-agent-YYYY-MM.log. It cannot
+    act: this build refuses to start with armed = true, because the shutdown
+    transaction is not written yet.
+
+    The point of running it is that thresholds picked on a bench are guesses.
+    Weeks of decisions against your own power are not. Leave it running, read
+    the log after the next outage, and tune jdups.conf before anything is ever
+    allowed to act on it.
+
+    PowerChute stays armed. This changes nothing about that.
+
 .PARAMETER SamplerOnly
     Register only the sampler. Useful on a machine nobody logs into.
 
@@ -55,6 +74,7 @@ param(
     [int]$Interval      = 300,
     [string]$Serial     = "",
     [switch]$PerUser,
+    [switch]$Agent,
     [switch]$SamplerOnly,
     [switch]$TrayOnly,
     # Carried across the UAC boundary; see the elevation block.
@@ -64,9 +84,13 @@ param(
 $ErrorActionPreference = "Stop"
 $TrayTask    = "jdups-tray"
 $SamplerTask = "jdups-sampler"
+$AgentTask   = "jdups-agent"
 
 if ($SamplerOnly -and $TrayOnly) {
     throw "-SamplerOnly and -TrayOnly are mutually exclusive."
+}
+if ($Agent -and $TrayOnly) {
+    throw "-Agent and -TrayOnly are mutually exclusive."
 }
 if ($Interval -lt 10 -or $Interval -gt 3600) {
     throw "-Interval must be between 10 and 3600 seconds."
@@ -103,6 +127,7 @@ if (-not $admin -and -not $PerUser) {
     if ($PSBoundParameters.ContainsKey("LogDir"))     { $argList += @("-LogDir", "`"$LogDir`"") }
     if ($PSBoundParameters.ContainsKey("Interval"))   { $argList += @("-Interval", $Interval) }
     if ($Serial)      { $argList += @("-Serial", $Serial) }
+    if ($Agent)       { $argList += "-Agent" }
     if ($SamplerOnly) { $argList += "-SamplerOnly" }
     if ($TrayOnly)    { $argList += "-TrayOnly" }
 
@@ -128,7 +153,9 @@ Write-Host "  log      -> $LogDir"
 # --- Locate the binaries -----------------------------------------------------
 $root = Split-Path -Parent $PSCommandPath
 $src = @{}
-foreach ($exe in @("jdups.exe", "jdups-tray.exe")) {
+$wanted = @("jdups.exe", "jdups-tray.exe")
+if ($Agent) { $wanted += "jdups-agent.exe" }
+foreach ($exe in $wanted) {
     $candidates = @(
         (Join-Path $root $exe),
         (Join-Path $root "target\release\$exe")
@@ -238,6 +265,43 @@ if (-not $TrayOnly) {
     } catch { Fail "registering ${SamplerTask}: $_" }
 }
 
+if ($Agent) {
+    try {
+        # The settings file lives beside the binary, not in the log directory:
+        # under a machine-wide install that puts it in Program Files, which is
+        # Administrators-write, so the file a SYSTEM agent trusts is not one an
+        # ordinary user can edit. Written only if absent -- an upgrade must
+        # never silently replace thresholds somebody chose.
+        $conf = Join-Path $InstallDir "jdups.conf"
+        if (Test-Path $conf) {
+            Write-Host "  kept existing jdups.conf"
+        } else {
+            & (Join-Path $InstallDir "jdups-agent.exe") --print-config |
+                Set-Content -Path $conf -Encoding UTF8
+            Write-Host "  wrote $conf (all defaults, all commented out)"
+        }
+
+        $args = "-q --dir `"$LogDir`""
+        if ($Serial) { $args += " --serial $Serial" }
+        $action = New-ScheduledTaskAction -Execute (Join-Path $InstallDir "jdups-agent.exe") -Argument $args
+        if ($PerUser) {
+            $me = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+            $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
+            $trigger = New-ScheduledTaskTrigger -AtLogOn -User $me
+            $desc = "at logon, as you"
+        } else {
+            $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" `
+                -LogonType ServiceAccount -RunLevel Highest
+            $trigger = New-ScheduledTaskTrigger -AtStartup
+            $desc = "SYSTEM, at startup"
+        }
+        Register-ScheduledTask -TaskName $AgentTask -Action $action `
+            -Trigger $trigger -Principal $principal -Settings (New-Settings) -Force | Out-Null
+        Start-ScheduledTask -TaskName $AgentTask
+        Write-Host "  registered $AgentTask ($desc, DRY RUN)"
+    } catch { Fail "registering ${AgentTask}: $_" }
+}
+
 if (-not $SamplerOnly) {
     try {
         if (-not $TrayUser) {
@@ -273,6 +337,13 @@ if ($PerUser -and -not $TrayOnly) {
     Write-Host ""
     Write-Host "  The sampler runs at logon, so the log has a gap whenever nobody is"
     Write-Host "  signed in. Re-run without -PerUser for continuous history."
+}
+if ($Agent) {
+    Write-Host ""
+    Write-Host "  The agent is in DRY RUN. It decides and logs; it cannot act."
+    Write-Host "  Thresholds:  $InstallDir\jdups.conf"
+    Write-Host "  Its log:     $LogDir\jdups-agent-YYYY-MM.log"
+    Write-Host "  Check them:  jdups-agent.exe --check"
 }
 Write-Host ""
 Write-Host "  PowerChute must stay installed and armed. jdups reads; it does not"

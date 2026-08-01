@@ -987,6 +987,56 @@ What the hardware findings forced into its shape:
   because a SYSTEM process that accepts any threshold it finds in a file is
   shutdown-as-a-service.
 
+### The dry run — **built**
+
+`jdups-agent.exe`, a console binary, three modules and no new dependency:
+
+| | |
+|---|---|
+| `src/config.rs` | the settings file, treated as a privilege boundary |
+| `src/agent/journal.rs` | what gets written, and when. Pure, 11 tests |
+| `src/agent/watch.rs` | the device loop feeding `policy` |
+| `src/agent/log.rs` | `jdups-agent-YYYY-MM.log`, prose not CSV |
+
+It decides and it logs. **`armed = true` is refused at startup with a non-zero
+exit**, because the shutdown transaction below does not exist, and an agent that
+quietly ran dry while its config said armed would be the worst outcome available
+here: somebody believing their machine is protected when it is not.
+
+What that split buys is the cheapest evidence in the project. Thresholds chosen
+on a bench are guesses. Point this at the real UPS, leave it for weeks, and the
+log says what it *would* have done against this machine's actual power — before
+anything is allowed to act on it.
+
+Four decisions worth recording:
+
+- **A malformed config is a hard error, never a fallback to defaults.** An agent
+  whose thresholds do not match the file in front of you cannot be reasoned
+  about. Unknown keys included: `runtime_threshhold_s` misspelt would otherwise
+  be accepted in silence while the real threshold stayed at its default.
+- **The reason comes out of `policy`, not out of the caller.** `Action::Shutdown`
+  now carries a `Why`. A log that says *that* it would have shut down but not
+  *why* cannot be used to tune anything, and a caller re-deriving the reason from
+  the same observation is free to disagree with the decision it is describing.
+- **A heartbeat while on battery, and silence on mains.** Logging every tick
+  makes a file nobody reads; logging only transitions leaves a twenty-minute
+  outage as two lines with no discharge curve between them. There is a test that
+  a machine sitting on mains produces literally nothing.
+- **The agent keeps deciding while the UPS is unreachable.** The disconnected
+  path still drives `policy` on its own cadence rather than sitting in a retry
+  loop, so the latch holds and the backstop still fires. This is the failure the
+  first draft of `policy` had backwards, and it is easy to reintroduce in the
+  loop after fixing it in the decision.
+
+A scheduled task rather than a service, for now — `install.ps1 -Agent`. Legitimate
+precisely because it cannot act: what a service buys is preshutdown notification
+and knowing when the machine suspends, and neither matters until something is
+armed.
+
+**Not yet seen an outage.** It has run against the live UPS on mains, found the
+device, and correctly written nothing. Every path from `Warn` onward is covered
+by tests and by nothing else.
+
 ### It is not where most of the risk is
 
 ```rust
@@ -1080,11 +1130,13 @@ installation note.
 
 ### The testing ladder
 
-1. **Exhaustive unit tests** on `decide`, no hardware.
+1. ~~**Exhaustive unit tests** on `decide`, no hardware.~~ **Done**, 15 tests.
 2. **Fault-injected state-machine tests** across every failure boundary and
    restart point.
-3. **Dry run** — logs what it would do, never calls shutdown. The default mode;
-   arming is explicit. Run for weeks against real power.
+3. ~~**Dry run** — logs what it would do, never calls shutdown. The default mode;
+   arming is explicit.~~ **Built.** Run for weeks against real power. The trigger
+   itself can be proven in fifteen seconds without draining anything, by giving
+   it absurd thresholds and pulling the plug: see `docs/status.md`.
 4. **The restart cycle, on a sacrificial load.** Confirm `FF86:7C`/`FF86:7D`
    against NUT before writing anything, then prove
    shutdown → mains return → restart end to end. This machine is not the test rig.

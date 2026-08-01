@@ -31,6 +31,7 @@ param(
 $ErrorActionPreference = "Stop"
 $TrayTask    = "jdups-tray"
 $SamplerTask = "jdups-sampler"
+$AgentTask   = "jdups-agent"
 
 $MachineDirs = @("$env:ProgramFiles\jdups", "$env:ProgramData\jdups")
 $UserDirs    = @("$env:LOCALAPPDATA\Programs\jdups", "$env:LOCALAPPDATA\jdups")
@@ -43,8 +44,10 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 # in.
 $needsAdmin = $false
 foreach ($d in $MachineDirs) { if (Test-Path $d) { $needsAdmin = $true } }
-$sampler = Get-ScheduledTask -TaskName $SamplerTask -ErrorAction SilentlyContinue
-if ($sampler -and $sampler.Principal.UserId -match 'SYSTEM') { $needsAdmin = $true }
+foreach ($t in @($SamplerTask, $AgentTask)) {
+    $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
+    if ($task -and $task.Principal.UserId -match 'SYSTEM') { $needsAdmin = $true }
+}
 
 if ($needsAdmin -and -not $admin -and -not $NoElevate) {
     Write-Host "A machine-wide install is present; elevating (accept the UAC prompt)..."
@@ -60,7 +63,7 @@ function Fail([string]$msg) { Write-Host "  FAILED: $msg" -ForegroundColor Red; 
 Write-Host "jdups uninstall"
 
 # --- Tasks -------------------------------------------------------------------
-foreach ($t in @($TrayTask, $SamplerTask)) {
+foreach ($t in @($TrayTask, $SamplerTask, $AgentTask)) {
     try {
         if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) {
             Stop-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
@@ -78,8 +81,9 @@ $paths = @()
 foreach ($d in ($MachineDirs + $UserDirs)) {
     $paths += (Join-Path $d "jdups.exe")
     $paths += (Join-Path $d "jdups-tray.exe")
+    $paths += (Join-Path $d "jdups-agent.exe")
 }
-foreach ($name in @("jdups", "jdups-tray")) {
+foreach ($name in @("jdups", "jdups-tray", "jdups-agent")) {
     Get-Process -Name $name -ErrorAction SilentlyContinue |
         Where-Object { $paths -contains $_.Path } |
         ForEach-Object {
@@ -100,7 +104,10 @@ Start-Sleep -Milliseconds 300
 foreach ($d in ($MachineDirs[0], $UserDirs[0])) {
     if (-not (Test-Path $d)) { continue }
     try {
-        foreach ($exe in @("jdups.exe", "jdups-tray.exe")) {
+        # jdups.conf goes with them. Without the agent it means nothing, and
+        # tuned thresholds are not lost: the agent writes its whole effective
+        # config into the log every time it starts, and the log is kept.
+        foreach ($exe in @("jdups.exe", "jdups-tray.exe", "jdups-agent.exe", "jdups.conf")) {
             $p = Join-Path $d $exe
             if (Test-Path $p) { Remove-Item $p -Force }
         }
