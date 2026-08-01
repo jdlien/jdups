@@ -4,6 +4,8 @@
 //! debugged through, and it has to hand the shell real stdout and a real exit
 //! code. The tray is `jdups-tray.exe`, built from the same lib.
 
+mod sample;
+
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -15,12 +17,19 @@ jdups - a readout for an APC Back-UPS
 
 USAGE:
     jdups [--once] [--watch [SECONDS]] [--probe] [--list] [--serial SERIAL]
+    jdups --sample [--interval SECONDS] [--dir PATH] [-v]
 
     --once           Print the current readout and exit (default)
     --watch [SECS]   Stream decoded input reports (default: until Ctrl-C)
     --probe          Dump the report descriptor: every value and button cap
     --list           List every HID collection present, and which one we'd pick
     --serial SERIAL  Select a specific unit when more than one is attached
+
+    --sample         Log to CSV continuously. This is the headless logger the
+                     scheduled task runs; it is the only writer of the log.
+    --interval SECS  Seconds per row (default 300)
+    --dir PATH       Where to write (default %ProgramData%\\jdups)
+    -v               Echo each row as it is written
 
 The notification-area icon is a separate binary: jdups-tray.exe
 ";
@@ -30,11 +39,24 @@ fn main() {
     let mut mode = "once";
     let mut serial: Option<String> = None;
     let mut watch_secs: Option<u64> = None;
+    let mut interval: Option<u64> = None;
+    let mut dir: Option<std::path::PathBuf> = None;
+    let mut verbose = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--once" => mode = "once",
+            "--sample" => mode = "sample",
+            "-v" | "--verbose" => verbose = true,
+            "--interval" => {
+                interval = args.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                i += 1;
+            }
+            "--dir" => {
+                dir = args.get(i + 1).map(std::path::PathBuf::from);
+                i += 1;
+            }
             "--probe" => mode = "probe",
             "--list" => mode = "list",
             "--watch" => {
@@ -65,9 +87,76 @@ fn main() {
 
     let code = match mode {
         "list" => cmd_list(),
+        "sample" => cmd_sample(serial, interval, dir, verbose),
         _ => run(mode, serial.as_deref(), watch_secs),
     };
     std::process::exit(code);
+}
+
+/// The headless logger.
+///
+/// A singleton, because two of these appending to one file would interleave
+/// rows and there would be no way to tell afterwards. `Global\` rather than
+/// `Local\`: the scheduled task runs as SYSTEM in a different session from
+/// the tray, and a session-local name would not collide with itself.
+fn cmd_sample(
+    serial: Option<String>,
+    interval: Option<u64>,
+    dir: Option<std::path::PathBuf>,
+    verbose: bool,
+) -> i32 {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = r"Global\jdups-sampler-singleton"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let h = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+    if h.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        eprintln!("jdups: a sampler is already running; not starting a second one");
+        return 1;
+    }
+
+    let opts = sample::Options {
+        interval: Duration::from_secs(interval.unwrap_or(jdups::logfile::DEFAULT_INTERVAL_S)),
+        dir: dir.unwrap_or_else(jdups::logfile::default_dir),
+        serial,
+        verbose,
+    };
+    println!(
+        "sampling every {}s into {}",
+        opts.interval.as_secs(),
+        opts.dir.display()
+    );
+
+    // Ctrl-C writes a final row rather than dropping the window on the floor.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stop);
+    let _ = ctrl_c_handler(move || flag.store(true, std::sync::atomic::Ordering::SeqCst));
+
+    sample::run(opts, stop)
+}
+
+/// Minimal Ctrl-C hook. The scheduled task stops us with a terminate, but a
+/// human running this by hand should get a clean last row.
+fn ctrl_c_handler<F: Fn() + Send + 'static>(f: F) -> Result<(), ()> {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+    static mut HOOK: Option<Box<dyn Fn() + Send>> = None;
+    unsafe extern "system" fn handler(_: u32) -> windows_sys::core::BOOL {
+        #[allow(static_mut_refs)]
+        if let Some(f) = unsafe { HOOK.as_ref() } {
+            f();
+        }
+        1
+    }
+    unsafe {
+        HOOK = Some(Box::new(f));
+        if SetConsoleCtrlHandler(Some(handler), 1) == 0 {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 fn cmd_list() -> i32 {

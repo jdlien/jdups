@@ -36,6 +36,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_System_Console",
+    "Win32_System_SystemInformation",   # GetLocalTime
+    "Win32_System_Time",                # GetTimeZoneInformation
     # --- tray (Phase 2-4) -------------------------------------------------
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
