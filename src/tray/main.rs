@@ -35,7 +35,8 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows_sys::Win32::UI::Shell::{
-    ShellExecuteW, Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE,
+    SetCurrentProcessExplicitAppUserModelID, ShellExecuteW, Shell_NotifyIconGetRect,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE,
     NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW,
     NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
 };
@@ -92,20 +93,51 @@ fn set_field(dst: &mut [u16], s: &str) {
     }
 }
 
+/// What Windows attributes notifications to.
+///
+/// `NOTIFYICONDATA` has no app-name field, so a `NIF_INFO` balloon — which
+/// Windows 10+ renders as a toast — is headed with whatever identity the
+/// process has. With none, that is the raw executable name, "jdups-tray.exe".
+///
+/// **This cuts a documented corner.** Microsoft specifies an AppUserModelID as
+/// `Company.Product.SubProduct.Version` and says it must not contain spaces;
+/// the conforming way to get a friendly heading is to install a Start Menu
+/// shortcut carrying the ID as a `System.AppUserModel.ID` property, after which
+/// Windows shows the *shortcut's* name. That needs a shortcut, an install step,
+/// and `IShellLink` + `IPropertyStore` — a lot of machinery for a line of text,
+/// and it would do nothing for a build run straight out of `target\release`.
+///
+/// An unregistered ID is simply displayed verbatim, which was verified here:
+/// `JDLien.jdups.UPSStatus` rendered as itself, and this renders as "UPS Status".
+/// The only surfaces it reaches are the toast heading and the entry under
+/// Settings > Notifications, and it is right for both.
+///
+/// If a future Windows starts enforcing the format, the symptom is a heading
+/// that reverts to the exe name, and the fix is the shortcut route above.
+const APP_ID: &str = "UPS Status";
+
 fn main() {
-    // The only argument worth having here: which unit, when there are two.
     let mut args = std::env::args().skip(1);
     let mut serial = None;
+    let mut test_balloon = false;
     while let Some(a) = args.next() {
-        if a == "--serial" {
-            serial = args.next();
+        match a.as_str() {
+            "--serial" => serial = args.next(),
+            // Fire a notification at startup. Notifications otherwise only
+            // appear on a real power transition, which is a slow way to iterate
+            // on how one looks.
+            "--balloon" => test_balloon = true,
+            _ => {}
         }
     }
-    std::process::exit(run(serial));
+    std::process::exit(run(serial, test_balloon));
 }
 
-fn run(serial: Option<String>) -> i32 {
+fn run(serial: Option<String>, test_balloon: bool) -> i32 {
     unsafe {
+        // Before any notification: this is what a toast is attributed to.
+        SetCurrentProcessExplicitAppUserModelID(wide(APP_ID).as_ptr());
+
         // Before any window or DPI-dependent call, or the first measurement is
         // taken in the wrong units and everything downstream inherits it.
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -136,6 +168,9 @@ fn run(serial: Option<String>) -> i32 {
 
         add_icon(app);
         refresh(app);
+        if test_balloon {
+            balloon(app, "UPS Status", "Test notification.");
+        }
 
         let mut msg: MSG = core::mem::zeroed();
         while GetMessageW(&mut msg, core::ptr::null_mut(), 0, 0) > 0 {
