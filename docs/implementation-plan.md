@@ -778,6 +778,37 @@ Medians are taken **per column over the same interval**, which is honest so long
 as the schema says so — a row is a summary of a window, not an instant that
 occurred. `n` makes a thin interval visible instead of silently equal-weight.
 
+### What gets an event row
+
+Everything PowerChute's own event log records, plus what it does not.
+
+| jdups `event` | PowerChute equivalent | `detail` |
+|---|---|---|
+| `started` / `stopped` | Monitoring Started / Stopped | |
+| `device-found` / `device-lost` | Communication Established / Lost | |
+| `onbattery` / `online` | On Battery / No Longer On Battery | `transfer=<code>` |
+| `selftest` | *(not in its event log)* | `result=passed\|warning\|error\|...` |
+| `status` | *(not in its event log)* | —, with `flags` |
+
+A first pass logged **only** the mains transition, which threw away nine of the
+eleven `PresentStatus` flags. An overload, comms dropping, or mains drifting out
+of regulation left no trace at all. Now any change to the *notable* flag set
+writes a row, where notable excludes `charging` (it toggles constantly during
+float-charging and every row would look like an event) and `battery_present`
+(true forever on a UPS with its battery in).
+
+**Self-tests come for free.** Report 33 is pushed on change, so a monthly
+self-test result arrives without being polled for — and "did the last self-test
+pass" is precisely the question a log kept over months exists to answer. The
+result names come from NUT's `apc-hid.c`; the one point confirmed here is the
+resting value, 6 = no test initiated. An unrecognised code renders as `code-N`
+rather than being forced into a name.
+
+**The transfer *reason* is feature-only.** `FF86:52` never appears on the input
+stream, so it has to be read at the moment of a transition or it is lost. It
+moved 0 → 8 during a real outage here, so the usage is live; the code table
+still wants decoding against NUT.
+
 ### Interval discipline
 
 - **A state transition closes the current interval and starts a new one.**

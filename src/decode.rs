@@ -123,6 +123,30 @@ pub fn last_transfer(buf: &[u8]) -> Option<u8> {
     u8_at(buf, report::LAST_TRANSFER, 0)
 }
 
+/// Self-test state, from `84:58`. Arrives as an input report on change.
+pub fn test(buf: &[u8]) -> Option<u8> {
+    u8_at(buf, report::TEST, 0)
+}
+
+/// Name a `Test` value.
+///
+/// The mapping is APC's convention as recorded by NUT's `apc-hid.c`, and the
+/// one point confirmed here is the resting value: this unit reads **6** with no
+/// test having been run, which matches "no test initiated". The rest is taken on
+/// NUT's authority rather than measured, so an unrecognised code renders as
+/// itself rather than being forced into a name.
+pub fn test_result(v: u8) -> String {
+    match v {
+        1 => "passed".into(),
+        2 => "warning".into(),
+        3 => "error".into(),
+        4 => "aborted".into(),
+        5 => "in-progress".into(),
+        6 => "none".into(),
+        other => format!("code-{other}"),
+    }
+}
+
 /// Battery installation date, from the HID `ManufacturerDate` packing.
 ///
 /// This is real device state read off the UPS, not a date in a file — and more
@@ -202,6 +226,35 @@ impl PresentStatus {
             }
         }
         s
+    }
+
+    /// The flags worth recording, in a stable order.
+    ///
+    /// Everything except `charging` and `battery_present`. Those two are
+    /// excluded for opposite reasons: `charging` toggles constantly during
+    /// normal float-charging and would make every log row look like an event,
+    /// and `battery_present` is true forever on a UPS with its battery in.
+    ///
+    /// `ac_present` is here even though it also gets its own column, because
+    /// this is the set that decides whether *something happened*, and mains is
+    /// the most important member of it.
+    pub fn notable(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        for (name, set) in [
+            ("ac", self.ac_present),
+            ("discharging", self.discharging),
+            ("shutdown-imminent", self.shutdown_imminent),
+            ("below-capacity-limit", self.below_remaining_capacity_limit),
+            ("time-limit-expired", self.remaining_time_limit_expired),
+            ("overload", self.overload),
+            ("comm-lost", self.communication_lost),
+            ("voltage-not-regulated", self.voltage_not_regulated),
+        ] {
+            if set {
+                v.push(name);
+            }
+        }
+        v
     }
 
     /// True when the UPS is running the load off its battery.
@@ -328,6 +381,25 @@ mod tests {
             discharging.on_battery(),
             "discharging must count even while ACPresent lags"
         );
+    }
+
+    /// The one value confirmed on the live unit: it rests at 6 with no test
+    /// having been run. The rest is NUT's mapping, taken on its authority.
+    #[test]
+    fn a_self_test_result_is_named_or_shown_raw() {
+        assert_eq!(test_result(6), "none");
+        assert_eq!(test_result(1), "passed");
+        assert_eq!(test_result(3), "error");
+        // An unrecognised code renders as itself rather than being forced into
+        // a name that might be a lie.
+        assert_eq!(test_result(9), "code-9");
+        assert_eq!(test_result(0), "code-0");
+    }
+
+    #[test]
+    fn the_test_report_decodes_only_from_its_own_report() {
+        assert_eq!(test(&[0x21, 6, 0, 0, 0]), Some(6));
+        assert_eq!(test(&[0x0C, 6, 0, 0, 0]), None);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::decode::PresentStatus;
 pub const DEFAULT_INTERVAL_S: u64 = 300;
 
 pub const HEADER: &str =
-    "timestamp,charge,runtime_s,load_pct,watts,input_v,battery_v,ac,n,event";
+    "timestamp,charge,runtime_s,load_pct,watts,input_v,battery_v,ac,n,event,flags,detail";
 
 /// Why a row was written.
 ///
@@ -35,8 +35,16 @@ pub enum Event {
     DeviceLost,
     /// The device came back.
     DeviceFound,
+    /// Sampling began. The counterpart to `Stopped`, and what tells a reader
+    /// that a hole in the timestamps is a restart rather than lost data.
+    Started,
     /// Sampling stopped cleanly.
     Stopped,
+    /// A self-test finished, started, or was aborted. `detail` names the result.
+    SelfTest,
+    /// Some other notable status flag changed -- overload, comms lost,
+    /// voltage out of regulation. `flags` says which are set now.
+    Status,
 }
 
 impl Event {
@@ -47,7 +55,10 @@ impl Event {
             Event::OnLine => "online",
             Event::DeviceLost => "device-lost",
             Event::DeviceFound => "device-found",
+            Event::Started => "started",
             Event::Stopped => "stopped",
+            Event::SelfTest => "selftest",
+            Event::Status => "status",
         }
     }
 
@@ -120,6 +131,8 @@ pub struct Accumulator {
     battery_v: Vec<u16>, // hundredths, to stay integral for the median
     rated_w: Option<u16>,
     status: Option<PresentStatus>,
+    /// Free text for whatever the event was: a test result, a transfer code.
+    detail: String,
     /// Stream samples seen. This is the `n` column.
     pub samples: u32,
 }
@@ -164,6 +177,11 @@ impl Accumulator {
         self.status = Some(s);
     }
 
+    /// Detail for the next row written. Cleared with the window.
+    pub fn set_detail(&mut self, d: impl Into<String>) {
+        self.detail = d.into();
+    }
+
     pub fn is_empty(&self) -> bool {
         self.samples == 0 && self.load.is_empty()
     }
@@ -182,8 +200,15 @@ impl Accumulator {
         };
         let ac = self.status.map(|s| if s.on_battery() { 0 } else { 1 });
 
+        // Flags are pipe-separated so the column stays one CSV field without
+        // needing quoting, and so a reader can substring-match for one of them.
+        let flags = self
+            .status
+            .map(|s| s.notable().join("|"))
+            .unwrap_or_default();
+
         format!(
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
             at.iso8601(),
             f(median(&self.charge).map(|v| v.to_string())),
             f(median(&self.runtime).map(|v| v.to_string())),
@@ -194,6 +219,8 @@ impl Accumulator {
             f(ac.map(|v| v.to_string())),
             self.samples,
             event.tag(),
+            flags,
+            self.detail,
         )
     }
 
@@ -208,6 +235,10 @@ impl Accumulator {
         *self = Accumulator::new();
         self.rated_w = rated;
         self.status = status;
+    }
+
+    pub fn is_empty_window(&self) -> bool {
+        self.is_empty()
     }
 }
 
@@ -426,7 +457,7 @@ mod tests {
         let row = a.row(&t(-360), Event::Interval);
         assert_eq!(
             row,
-            "2026-07-31T15:04:22-06:00,100,2595,21,189,117,27.26,1,3,"
+            "2026-07-31T15:04:22-06:00,100,2595,21,189,117,27.26,1,3,,ac,"
         );
     }
 
@@ -447,7 +478,7 @@ mod tests {
     fn absent_fields_are_blank_not_zero() {
         let a = Accumulator::new();
         let row = a.row(&t(0), Event::DeviceLost);
-        assert_eq!(row, "2026-07-31T15:04:22+00:00,,,,,,,,0,device-lost");
+        assert_eq!(row, "2026-07-31T15:04:22+00:00,,,,,,,,0,device-lost,,");
         assert!(!row.contains(",0,0,"), "a gap rendered as real zeroes: {row}");
     }
 
@@ -470,7 +501,10 @@ mod tests {
             Event::OnLine,
             Event::DeviceLost,
             Event::DeviceFound,
+            Event::Started,
             Event::Stopped,
+            Event::SelfTest,
+            Event::Status,
         ] {
             assert!(e.closes_interval(), "{e:?} should close the interval");
         }
@@ -495,6 +529,60 @@ mod tests {
             (PAGE_BATTERY, 0xD1),
         ]));
         assert_eq!(a.row(&t(0), Event::Interval).split(',').nth(7), Some("0"));
+    }
+
+    /// Self-tests and the other status flags used to be thrown away entirely:
+    /// the sampler only ever logged the mains transition, so a failed self-test
+    /// or an overload left no trace at all.
+    #[test]
+    fn the_flags_column_carries_what_the_ac_column_cannot() {
+        let mut a = Accumulator::new();
+        a.set_status(PresentStatus::from_usages(&[
+            (PAGE_BATTERY, 0xD1),
+            (PAGE_BATTERY, 0x45),
+            (PAGE_POWER, 0x65), // Overload
+        ]));
+        let flags = a.row(&t(0), Event::Status).split(',').nth(10).unwrap().to_string();
+        assert!(flags.contains("discharging"), "{flags}");
+        assert!(flags.contains("overload"), "{flags}");
+        assert!(!flags.contains("ac"), "mains is absent, so it must not be listed");
+    }
+
+    /// Charging toggles constantly during normal float-charging. Listing it
+    /// would make every row look like something happened.
+    #[test]
+    fn the_flags_column_ignores_the_noisy_ones() {
+        let s = PresentStatus::from_usages(&[
+            (PAGE_BATTERY, 0xD0),
+            (PAGE_BATTERY, 0xD1),
+            (PAGE_BATTERY, 0x44), // Charging
+        ]);
+        assert_eq!(s.notable(), vec!["ac"]);
+    }
+
+    #[test]
+    fn the_detail_column_carries_the_event_specifics() {
+        let mut a = Accumulator::new();
+        a.set_status(mains());
+        a.set_detail("result=passed");
+        assert_eq!(
+            a.row(&t(0), Event::SelfTest).split(',').nth(11),
+            Some("result=passed")
+        );
+        // ...and does not survive into the next window.
+        a.reset();
+        assert_eq!(a.row(&t(0), Event::Interval).split(',').nth(11), Some(""));
+    }
+
+    #[test]
+    fn every_event_has_a_distinct_tag() {
+        let all = [
+            Event::Interval, Event::OnBattery, Event::OnLine, Event::DeviceLost,
+            Event::DeviceFound, Event::Started, Event::Stopped, Event::SelfTest,
+            Event::Status,
+        ];
+        let tags: std::collections::BTreeSet<_> = all.iter().map(|e| e.tag()).collect();
+        assert_eq!(tags.len(), all.len(), "two events share a tag");
     }
 
     #[test]

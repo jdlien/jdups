@@ -50,7 +50,11 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut last_sweep = Instant::now() - sweep_every;
 
     let mut last_status: Option<PresentStatus> = None;
+    let mut last_test: Option<u8> = None;
     let mut device_ok = false;
+    // Whether the log has a start marker yet, so a reader can tell a gap apart
+    // from the beginning of the file.
+    let mut started = false;
 
     let write = |acc: &mut Accumulator, event: Event, verbose: bool| {
         let at = logfile::now_local();
@@ -74,13 +78,22 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 Ok(d) => {
                     backoff = RETRY_MIN;
                     device = Some(d);
-                    if device_ok {
-                        // Only interesting if we had previously said it was lost.
+                    // The condition here was inverted: `device_ok` is *cleared*
+                    // when the device goes away, so testing it on reconnect
+                    // meant the "came back" row could never be written and a
+                    // gap in the log had a beginning but no end. Found by
+                    // comparing the event list against PowerChute's.
+                    if !started {
+                        started = true;
+                        write(&mut acc, Event::Started, opts.verbose);
+                        window_start = Instant::now();
+                    } else if !device_ok {
                         write(&mut acc, Event::DeviceFound, opts.verbose);
                         window_start = Instant::now();
                     }
                     device_ok = true;
                     last_status = None;
+                    last_test = initial_test(device.as_ref().unwrap());
                     device.as_ref().unwrap()
                 }
                 Err(e) => {
@@ -110,18 +123,51 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     // is never averaged into invisibility by a five-minute
                     // median that spans both sides of it.
                     if let Some(prev) = last_status {
-                        if prev.on_battery() != s.on_battery() {
-                            let e = if s.on_battery() {
-                                Event::OnBattery
-                            } else {
-                                Event::OnLine
-                            };
+                        let power_moved = prev.on_battery() != s.on_battery();
+                        // Any other notable flag moving is worth a row too:
+                        // an overload, comms dropping, mains out of regulation.
+                        // Logging only the mains transition threw all of that
+                        // away, which is the gap this closes.
+                        let flags_moved = prev.notable() != s.notable();
+
+                        if power_moved || flags_moved {
                             sweep(dev, &mut acc);
+                            let e = if power_moved {
+                                // The *reason* is the interesting half of a
+                                // transfer and it is feature-only, so it is only
+                                // ever available if we go and read it.
+                                if let Some(r) = dev
+                                    .feature(report::LAST_TRANSFER)
+                                    .ok()
+                                    .as_deref()
+                                    .and_then(decode::last_transfer)
+                                {
+                                    acc.set_detail(format!("transfer={r}"));
+                                }
+                                if s.on_battery() { Event::OnBattery } else { Event::OnLine }
+                            } else {
+                                Event::Status
+                            };
                             write(&mut acc, e, opts.verbose);
                             window_start = Instant::now();
                         }
                     }
                     last_status = Some(s);
+                }
+                // Self-tests. Report 33 is pushed on change, so a monthly
+                // self-test result lands here without being polled for -- and
+                // "did the last self-test pass" is exactly the question the log
+                // exists to answer over months.
+                Some(report::TEST) => {
+                    if let Some(v) = decode::test(&buf) {
+                        if last_test.is_some_and(|p| p != v) {
+                            sweep(dev, &mut acc);
+                            acc.set_detail(format!("result={}", decode::test_result(v)));
+                            write(&mut acc, Event::SelfTest, opts.verbose);
+                            window_start = Instant::now();
+                        }
+                        last_test = Some(v);
+                    }
                 }
                 _ => {}
             },
@@ -147,8 +193,9 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     }
 
     // A final row, so a clean stop is visible in the data rather than looking
-    // like the machine fell over.
-    if device_ok && !acc.is_empty() {
+    // like the machine fell over. Unconditional once started: an empty last
+    // window is exactly when you most want to know the stop was orderly.
+    if started {
         write(&mut acc, Event::Stopped, opts.verbose);
     }
     0
@@ -167,6 +214,12 @@ fn sweep(dev: &hid::raw::Device, acc: &mut Accumulator) {
     if let Some(b) = f(report::PRESENT_STATUS) {
         acc.set_status(dev.status_of(&b, false));
     }
+}
+
+/// The self-test state at startup, so the first value seen on the stream is a
+/// baseline rather than a spurious "the test result changed" row.
+fn initial_test(dev: &hid::raw::Device) -> Option<u8> {
+    dev.feature(report::TEST).ok().as_deref().and_then(decode::test)
 }
 
 fn sleep_interruptibly(d: Duration, stop: &AtomicBool) {
