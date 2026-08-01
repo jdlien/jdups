@@ -181,7 +181,12 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         tick(&mut state, &mut journal, &o, &cfg, dry_run, &say);
 
         // --- watch the countdown registers ---------------------------------
-        if polled {
+        // On battery this runs every pass rather than every poll. The moment
+        // worth catching is a few hundred milliseconds wide: whoever arms the
+        // UPS does it late in a shutdown sequence, and this process is being
+        // torn down by that same sequence. A 2 s cadence could miss the only
+        // event the watch exists for.
+        if polled || o.on_battery {
             let now = countdown(dev);
             if last_countdown.is_some_and(|prev| prev != now) {
                 say(Level::Act, &describe_countdown(&now));
@@ -190,6 +195,15 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
     }
 
+    // A last look on the way out, because *this* is the likeliest moment to
+    // have missed one. Windows delivers CTRL_SHUTDOWN_EVENT to console
+    // processes as it goes down, which is what breaks the loop above -- so if
+    // something armed the UPS as part of that same shutdown, this read is the
+    // closest we get to it. Unconditional: "nothing was armed" is worth
+    // recording too, since it is what rules the hypothesis out.
+    if let Some(d) = device.as_ref() {
+        say(Level::Info, &format!("final read, {}", describe_countdown(&countdown(d))));
+    }
     say(Level::Info, "stopped");
     0
 }
