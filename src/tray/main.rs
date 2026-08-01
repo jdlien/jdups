@@ -13,6 +13,7 @@
 
 mod device;
 mod draw;
+mod png;
 
 use std::time::Duration;
 
@@ -37,7 +38,7 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::Shell::{
     SetCurrentProcessExplicitAppUserModelID, ShellExecuteW, Shell_NotifyIconGetRect,
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE,
-    NIF_SHOWTIP, NIF_TIP, NIIF_LARGE_ICON, NIIF_NONE, NIIF_USER, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIF_SHOWTIP, NIF_TIP, NIIF_NONE, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -120,6 +121,115 @@ fn set_field(dst: &mut [u16], s: &str) {
 /// that reverts to the exe name, and the fix is the shortcut route above.
 const APP_ID: &str = "UPS Status";
 
+/// Give the AppUserModelID a name and a picture, so the toast header has
+/// something to draw in the gap beside the app name.
+///
+/// The heading worked without this because an unregistered ID is displayed
+/// verbatim. The **icon** does not: the shell looks the ID up, finds nothing,
+/// and leaves the space empty. That is the gap.
+///
+/// `HKCU\Software\Classes\AppUserModelId\<id>` is the documented registration
+/// for an unpackaged desktop app, and it is per-user, so this needs no
+/// elevation and no installer step — a build run straight out of
+/// `target\release` registers itself the same way an installed one does.
+///
+/// `IconUri` is a **path to a file**, which is why there is a PNG writer in this
+/// crate: an `HICON` cannot be handed over. The file is rewritten on every start
+/// rather than only when missing, so changing how the battery is drawn does not
+/// leave a stale picture behind forever.
+///
+/// Best-effort throughout. A failure here costs a picture, and taking the tray
+/// down over it would be a bad trade.
+unsafe fn register_app_id() {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+
+    let Some(icon) = write_toast_icon() else { return };
+
+    let path = wide(&format!(r"Software\Classes\AppUserModelId\{APP_ID}"));
+    let mut key: HKEY = core::ptr::null_mut();
+    let rc = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            core::ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            core::ptr::null(),
+            &mut key,
+            core::ptr::null_mut(),
+        )
+    };
+    if rc != 0 || key.is_null() {
+        return;
+    }
+
+    let set_sz = |name: &str, value: &str| {
+        let n = wide(name);
+        let v = wide(value);
+        unsafe {
+            RegSetValueExW(
+                key,
+                n.as_ptr(),
+                0,
+                REG_SZ,
+                v.as_ptr() as *const u8,
+                (v.len() * 2) as u32,
+            )
+        };
+    };
+    set_sz("DisplayName", APP_ID);
+    set_sz("IconUri", &icon);
+
+    // Without this the entry is invisible under Settings > Notifications, and
+    // an app whose notifications cannot be turned off from the usual place is
+    // an app that has overstayed its welcome.
+    let n = wide("ShowInSettings");
+    let one: u32 = 1;
+    unsafe {
+        RegSetValueExW(
+            key,
+            n.as_ptr(),
+            0,
+            REG_DWORD,
+            &one as *const u32 as *const u8,
+            4,
+        );
+        RegCloseKey(key);
+    }
+}
+
+/// Draw the plain battery and write it out as a PNG, returning its path.
+///
+/// 64 px because the shell scales this down to whatever the header wants and a
+/// larger source survives that better than a 16 px one does. There are no digits
+/// on it, so none of the per-size font tables are involved and the size is free
+/// to be chosen for the medium rather than for the type.
+fn write_toast_icon() -> Option<String> {
+    let dir = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)?.join("jdups");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("toast-icon.png");
+
+    const SIZE: i32 = 64;
+    let px = draw::pixels(SIZE, draw::Gauge::plain());
+    // 0xAARRGGBB, premultiplied, but every pixel here is fully opaque or fully
+    // transparent, so premultiplied and straight are the same bytes.
+    let mut rgba = Vec::with_capacity(px.len() * 4);
+    for p in px {
+        rgba.push((p >> 16) as u8);
+        rgba.push((p >> 8) as u8);
+        rgba.push(p as u8);
+        rgba.push((p >> 24) as u8);
+    }
+
+    let bytes = png::encode(SIZE as u32, SIZE as u32, &rgba);
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut serial = None;
@@ -139,8 +249,10 @@ fn main() {
 
 fn run(serial: Option<String>, test_balloon: bool) -> i32 {
     unsafe {
-        // Before any notification: this is what a toast is attributed to.
+        // Before any notification: this is what a toast is attributed to, and
+        // what the shell looks up to find the header's name and icon.
         SetCurrentProcessExplicitAppUserModelID(wide(APP_ID).as_ptr());
+        register_app_id();
 
         // Before any window or DPI-dependent call, or the first measurement is
         // taken in the wrong units and everything downstream inherits it.
@@ -386,66 +498,36 @@ fn tooltip(s: &Snapshot) -> String {
 }
 
 unsafe fn balloon(app: *mut App, title: &str, text: &str) {
-    // Supply the icon explicitly.
+    // No `NIIF_USER`, and that is the point.
     //
-    // Windows used to derive a toast's icon from the process itself, which is
-    // why one appeared for free. Giving the process an AppUserModelID replaced
-    // that with an identity lookup, and an unregistered ID resolves to no icon,
-    // so setting the heading silently took the picture away.
+    // There are two icons on a toast and they are not interchangeable. The one
+    // this call controls is the **body** image, which Windows 11 renders large,
+    // beside the text. The one in the **header**, in the gap before the app
+    // name, comes from the AppUserModelID registration instead — see
+    // `register_app_id`, which is what fills it.
     //
-    // NIIF_USER says "use hBalloonIcon", which sidesteps the lookup entirely.
+    // A body image is the wrong place for this program's mark. It is enormous
+    // next to two lines of text that already say the state in words, and the
+    // small header icon is what actually identifies the notification at a
+    // glance. So: register the identity, and send the notification bare.
     //
-    // **NIIF_LARGE_ICON means SM_CXICON at the current DPI, and nothing else.**
-    // A hardcoded 32 is correct only at 100 % scaling; at 125 % the shell wants
-    // 40 and rejects the call with ERROR_INCORRECT_SIZE. That does not merely
-    // drop the picture — `Shell_NotifyIconW` returns 0 and **no notification
-    // appears at all**. The first version of this shipped with the hardcoded 32,
-    // and cost every notification on the machine until it was measured.
-    //
-    // The icon is the plain battery, not the live gauge. Putting the real gauge
-    // here looked like the better idea and wasn't: at 40 px the hand-drawn digit
-    // sets have run out — the largest is 8x13 — so the number rendered as a
-    // scaled-up diagram of itself, which is the exact failure those per-size
-    // tables exist to prevent. It was also redundant, since the toast says the
-    // state in words directly beside it. See `Gauge::plain`.
-    //
-    // It no longer depends on a snapshot, so a toast can carry its icon even
-    // when the device is the thing that went missing.
-    let dpi = unsafe { icon_dpi(app) };
-    let size = unsafe { GetSystemMetricsForDpi(SM_CXICON, dpi) }.max(16);
-    let icon = Some(unsafe { draw::icon(size, &draw::pixels(size, draw::Gauge::plain())) })
-        .filter(|h| !h.is_null());
-
+    // The route not taken cost a day, and is worth leaving written down.
+    // `NIIF_USER | NIIF_LARGE_ICON` supplies the body image from an `HICON`, and
+    // `NIIF_LARGE_ICON` means `SM_CXICON` **at the current DPI**, nothing else.
+    // A hardcoded 32 is right only at 100 % scaling; at 125 % the shell wants 40
+    // and refuses the call with `ERROR_INCORRECT_SIZE`. It does not degrade to a
+    // plain toast — `Shell_NotifyIconW` returns 0 and **nothing appears at
+    // all**. An icon that is merely wrong is visible; a notification that never
+    // fires is not, and this one stayed broken until it was measured rather
+    // than reasoned about.
     unsafe {
         let nid = &mut (*app).nid;
         nid.uFlags = NIF_INFO;
         set_field(&mut nid.szInfoTitle, title);
         set_field(&mut nid.szInfo, text);
-
-        let mut shown = false;
-        if let Some(h) = icon {
-            nid.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
-            nid.hBalloonIcon = h;
-            shown = Shell_NotifyIconW(NIM_MODIFY, nid) != 0;
-        }
-
-        // The notification matters more than the picture on it. Whatever the
-        // shell dislikes about the icon, an unadorned toast that fires beats a
-        // decorated one that does not, and this is the exact failure that
-        // bug cost: silence, on the one message the program exists to deliver.
-        if !shown {
-            nid.dwInfoFlags = NIIF_NONE;
-            nid.hBalloonIcon = core::ptr::null_mut();
-            Shell_NotifyIconW(NIM_MODIFY, nid);
-        }
-
-        // Freed only after the shell has been handed it. Held in App rather
-        // than dropped here so the previous one outlives any in-flight toast.
-        let old = (*app).balloon_icon;
-        (*app).balloon_icon = icon.unwrap_or(core::ptr::null_mut());
-        if !old.is_null() {
-            DestroyIcon(old);
-        }
+        nid.dwInfoFlags = NIIF_NONE;
+        nid.hBalloonIcon = core::ptr::null_mut();
+        Shell_NotifyIconW(NIM_MODIFY, nid);
     }
 }
 
