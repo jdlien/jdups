@@ -263,7 +263,10 @@ pub fn append(dir: &Path, at: &LocalTime, row: &str) -> std::io::Result<PathBuf>
     let fresh = !path.exists();
     let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
     if fresh {
-        writeln!(f, "# jdups log v1  interval={DEFAULT_INTERVAL_S}s  medians per interval")?;
+        // No interval in the header: it is a per-run option, the file is
+        // monthly, and a restart with a different --interval mid-month would
+        // make a stamped value a lie. The row timestamps carry the cadence.
+        writeln!(f, "# jdups log v1  medians per interval")?;
         writeln!(f, "{HEADER}")?;
     }
     writeln!(f, "{row}")?;

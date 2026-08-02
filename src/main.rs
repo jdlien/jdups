@@ -57,12 +57,21 @@ fn main() {
             "--once" => mode = "once",
             "--sample" => mode = "sample",
             "-v" | "--verbose" => verbose = true,
+            // Bad values are fatal, not defaulted. `--interval abc` silently
+            // sampling at 300 s is a logger that ignored what it was told,
+            // discovered months later when the data is at the wrong cadence.
             "--interval" => {
-                interval = args.get(i + 1).and_then(|v| v.parse::<u64>().ok());
+                interval = match args.get(i + 1).and_then(|v| v.parse::<u64>().ok()) {
+                    Some(n) if n > 0 => Some(n),
+                    _ => fail_usage("--interval needs a whole number of seconds, at least 1"),
+                };
                 i += 1;
             }
             "--dir" => {
-                dir = args.get(i + 1).map(std::path::PathBuf::from);
+                dir = match args.get(i + 1) {
+                    Some(v) => Some(std::path::PathBuf::from(v)),
+                    None => fail_usage("--dir needs a path"),
+                };
                 i += 1;
             }
             "--probe" => mode = "probe",
@@ -74,10 +83,15 @@ fn main() {
             }
             "--read" => {
                 mode = "read";
-                read_ids = args
-                    .get(i + 1)
-                    .map(|v| v.split(',').filter_map(|s| s.trim().parse::<u8>().ok()).collect())
-                    .unwrap_or_default();
+                // All-or-nothing: `--read 21,300` dropping the unparseable 300
+                // in silence reads exactly like 300 answering nothing.
+                read_ids = match args.get(i + 1) {
+                    Some(v) => match v.split(',').map(|s| s.trim().parse::<u8>()).collect() {
+                        Ok(ids) => ids,
+                        Err(_) => fail_usage("--read takes report numbers 0-255, comma separated"),
+                    },
+                    None => fail_usage("--read needs at least one report number"),
+                };
                 i += 1;
             }
             "--list" => mode = "list",
@@ -92,7 +106,10 @@ fn main() {
                 }
             }
             "--serial" => {
-                serial = args.get(i + 1).cloned();
+                serial = match args.get(i + 1) {
+                    Some(v) => Some(v.clone()),
+                    None => fail_usage("--serial needs a serial number; see --list"),
+                };
                 i += 1;
             }
             "-h" | "--help" => {
@@ -130,6 +147,13 @@ fn main() {
         _ => run(mode, serial.as_deref(), watch_secs),
     };
     std::process::exit(code);
+}
+
+/// A bad argument is fatal. The alternative was silently falling back to a
+/// default, which is a program doing something other than what it was told.
+fn fail_usage(msg: &str) -> ! {
+    eprintln!("jdups: {msg}");
+    std::process::exit(2);
 }
 
 /// The headless logger.

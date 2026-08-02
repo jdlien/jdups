@@ -56,19 +56,29 @@ fn main() {
     let mut echo = true;
     let mut mode = "run";
 
+    // A flag missing its value is fatal. `--dir` alone silently logging to the
+    // default directory is an agent doing something other than what it was
+    // told, in a binary where that difference can be a shutdown.
+    let value_of = |args: &[String], i: usize, what: &str| -> String {
+        args.get(i + 1).cloned().unwrap_or_else(|| {
+            eprintln!("jdups-agent: {} needs a value", what);
+            std::process::exit(2);
+        })
+    };
+
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--dir" => {
-                dir = args.get(i + 1).map(std::path::PathBuf::from);
+                dir = Some(std::path::PathBuf::from(value_of(&args, i, "--dir")));
                 i += 1;
             }
             "--config" => {
-                config = args.get(i + 1).map(std::path::PathBuf::from);
+                config = Some(std::path::PathBuf::from(value_of(&args, i, "--config")));
                 i += 1;
             }
             "--serial" => {
-                serial = args.get(i + 1).cloned();
+                serial = Some(value_of(&args, i, "--serial"));
                 i += 1;
             }
             "-q" | "--quiet" => echo = false,
