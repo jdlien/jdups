@@ -199,6 +199,7 @@ mod tests {
             shutdown_imminent: false,
             charge: Some(charge),
             runtime_s: Some(runtime_s),
+            wake: jdups::policy::WakeEvent::None,
         }
     }
 

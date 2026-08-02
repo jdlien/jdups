@@ -23,7 +23,7 @@ use jdups::config::Settings;
 use jdups::decode::{self, report, PresentStatus};
 use jdups::hid::{self, Ups};
 use jdups::logfile;
-use jdups::policy::{Observation, State};
+use jdups::policy::{Observation, State, WakeEvent};
 use jdups::status::{self, Event, Phase, Status};
 
 use crate::journal::{Journal, Level, Tick};
@@ -188,7 +188,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     // with nothing listening -- in exactly the scenario it was
                     // written for. There is no device to arm, but the machine
                     // can still be shut down, which is the half that matters.
-                    let o = observe(&start, false, &status, charge, runtime_s);
+                    let o = observe(&start, false, &status, charge, runtime_s, WakeEvent::None);
                     let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
                     let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
                     if action.is_shutdown() && !dry_run && committed_at.is_none() {
@@ -325,29 +325,19 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             }
         }
 
-        // The status is what `fresh` means to `policy`: it gates the latch, and
-        // the latch is what an outage hangs on. Numbers going stale on their own
-        // is survivable; a stale status pretending to be current is not.
-        let o = observe(&start, status_fresh, &status, charge, runtime_s);
-        let _ = numbers_fresh;
-        if o.fresh {
-            last_answer = Instant::now();
-        }
-        let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
-        let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
-
-        // --- did we just wake into an outage? --------------------------------
-        // Only a service is told this. If the machine resumed with no sign of a
-        // person and it is on battery, the UPS is almost certainly what woke it:
-        // nobody is here, and spending twenty-five more minutes of battery
-        // holding up an idle machine is backwards. Opt-in, because the wake path
-        // is hard to exercise and the conservative default is to do nothing
-        // surprising.
+        // --- resumes, from the service control handler ------------------------
+        // Only a service is told. Read *before* the observation is assembled so
+        // the policy sees the wake on the same pass; what to do about it lives
+        // in `policy::WakeEvent`. Wiring it here as a bare commitment used to be
+        // cancelled by the very next pass, because the policy's action never
+        // said Shutdown -- the option could not fire at all.
+        let mut wake_event = WakeEvent::None;
         if let Some(w) = opts.wake.as_ref() {
             let seq = w.seq.load(Ordering::SeqCst);
             if seq != last_wake_seq {
                 last_wake_seq = seq;
                 let alone = w.resumed_alone.load(Ordering::SeqCst);
+                wake_event = if alone { WakeEvent::Alone } else { WakeEvent::Attended };
                 say(
                     Level::Info,
                     if alone {
@@ -356,15 +346,19 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                         "resumed from sleep"
                     },
                 );
-                if alone && cfg.shutdown_on_wake && state.on_battery() && committed_at.is_none() {
-                    say(
-                        Level::Act,
-                        "woke onto battery with nobody here; shutting down rather than                          spending the battery on an idle machine",
-                    );
-                    committed_at = Some(o.now_s);
-                }
             }
         }
+
+        // The status is what `fresh` means to `policy`: it gates the latch, and
+        // the latch is what an outage hangs on. Numbers going stale on their own
+        // is survivable; a stale status pretending to be current is not.
+        let o = observe(&start, status_fresh, &status, charge, runtime_s, wake_event);
+        let _ = numbers_fresh;
+        if o.fresh {
+            last_answer = Instant::now();
+        }
+        let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
+        let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
 
         // --- do not let it sleep through an outage --------------------------
         // Driven off the latched outage state rather than the raw reading, so a
@@ -688,6 +682,7 @@ fn observe(
     status: &Option<PresentStatus>,
     charge: Option<u8>,
     runtime_s: Option<u16>,
+    wake: WakeEvent,
 ) -> Observation {
     Observation {
         now_s: start.elapsed().as_secs(),
@@ -699,6 +694,7 @@ fn observe(
         shutdown_imminent: status.is_some_and(|s| s.shutdown_imminent),
         charge,
         runtime_s,
+        wake,
     }
 }
 
@@ -754,7 +750,7 @@ mod tests {
     #[test]
     fn numbers_without_a_status_are_not_fresh() {
         let start = Instant::now();
-        let o = observe(&start, true, &None, Some(80), Some(1800));
+        let o = observe(&start, true, &None, Some(80), Some(1800), WakeEvent::None);
         assert!(!o.fresh);
         assert!(!o.on_battery);
     }
@@ -762,7 +758,7 @@ mod tests {
     #[test]
     fn a_status_read_carries_both_flags_through() {
         let start = Instant::now();
-        let o = observe(&start, true, &Some(status(false, true)), Some(80), Some(1800));
+        let o = observe(&start, true, &Some(status(false, true)), Some(80), Some(1800), WakeEvent::None);
         assert!(o.fresh);
         assert!(o.on_battery);
         assert!(o.shutdown_imminent);
@@ -772,7 +768,7 @@ mod tests {
     #[test]
     fn a_failed_tick_keeps_the_numbers_and_drops_freshness() {
         let start = Instant::now();
-        let o = observe(&start, false, &Some(status(false, false)), Some(80), Some(1800));
+        let o = observe(&start, false, &Some(status(false, false)), Some(80), Some(1800), WakeEvent::None);
         assert!(!o.fresh);
         assert_eq!(o.charge, Some(80));
         assert!(o.on_battery, "the latch has to see the last known state");
@@ -789,13 +785,13 @@ mod tests {
 
         // Seen on battery once, then nothing ever again.
         let seen = Some(status(false, false));
-        let mut o = observe(&start, true, &seen, Some(90), Some(2000));
+        let mut o = observe(&start, true, &seen, Some(90), Some(2000), WakeEvent::None);
         o.now_s = 0;
         assert_eq!(state.observe(&o, &cfg), Action::Warn);
 
         let mut last = Action::Nothing;
         for t in 1..=cfg.max_on_battery_s {
-            let mut o = observe(&start, false, &seen, Some(90), Some(2000));
+            let mut o = observe(&start, false, &seen, Some(90), Some(2000), WakeEvent::None);
             o.now_s = t;
             last = state.observe(&o, &cfg);
         }

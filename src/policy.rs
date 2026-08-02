@@ -29,6 +29,14 @@
 /// this margin is a threshold that lies.
 pub const OS_GRACE_ALLOWANCE_S: u64 = 10;
 
+/// How long after an unattended resume an outage may still be blamed on it.
+///
+/// The realistic gap is seconds: the resume broadcast lands, the loop polls
+/// within two, and the latch follows the first believed reading. The window is
+/// generous to cover a slow resume, and bounded so an unattended maintenance
+/// wake at 3 a.m. cannot arm a prompt shutdown for an outage hours later.
+pub const WAKE_ATTRIBUTION_S: u64 = 60;
+
 /// What the agent should do about the world as it currently stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -62,6 +70,9 @@ pub enum Why {
     Runtime,
     /// Charge at or below the floor, held past the debounce.
     Charge,
+    /// The machine woke by itself onto battery and `shutdown_on_wake` says an
+    /// idle machine should not spend the battery waiting for the thresholds.
+    Wake,
 }
 
 impl Why {
@@ -71,8 +82,24 @@ impl Why {
             Why::Backstop => "on battery past the maximum",
             Why::Runtime => "predicted runtime below the threshold",
             Why::Charge => "charge below the floor",
+            Why::Wake => "woke unattended onto battery",
         }
     }
+}
+
+/// What the service learned about a resume since the last observation.
+///
+/// Only a service is ever told. A console agent and a scheduled task always
+/// pass `None`, which leaves the wake route permanently unarmed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum WakeEvent {
+    /// No resume since the last observation.
+    #[default]
+    None,
+    /// The machine resumed and nothing indicates a person did it.
+    Alone,
+    /// The machine resumed and a person was involved, or has since shown up.
+    Attended,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +257,10 @@ pub struct Observation {
     pub shutdown_imminent: bool,
     pub charge: Option<u8>,
     pub runtime_s: Option<u16>,
+    /// A resume noticed since the last observation, from the service control
+    /// handler. An edge, not a level: `Alone`/`Attended` appear on exactly one
+    /// observation each and `None` everywhere else.
+    pub wake: WakeEvent,
 }
 
 /// What the agent remembers between observations.
@@ -243,6 +274,12 @@ pub struct State {
     mains_since: Option<u64>,
     /// Last time the device actually spoke.
     last_fresh: Option<u64>,
+    /// When the machine last resumed with nobody involved, for the wake route.
+    wake_at: Option<u64>,
+    /// Whether that wake has been tied to the current outage. Sticky until the
+    /// outage clears or a person shows up, so the grace period cannot outlast
+    /// the attribution window and watch the decision evaporate.
+    wake_armed: bool,
 }
 
 impl State {
@@ -268,6 +305,20 @@ impl State {
             self.last_fresh = Some(o.now_s);
         }
 
+        // --- the wake route's bookkeeping --------------------------------
+        // Windows sends the automatic broadcast for every resume and adds the
+        // user one when a person was involved, possibly delayed until they
+        // touch the machine. So Attended must be able to retract an Alone that
+        // already armed.
+        match o.wake {
+            WakeEvent::Alone => self.wake_at = Some(o.now_s),
+            WakeEvent::Attended => {
+                self.wake_at = None;
+                self.wake_armed = false;
+            }
+            WakeEvent::None => {}
+        }
+
         // --- the latch --------------------------------------------------
         // A confirmed outage stays confirmed until mains is *freshly* confirmed
         // back, for long enough to not be a flap. Silence never clears it.
@@ -283,6 +334,10 @@ impl State {
                 if o.now_s.saturating_sub(since) >= cfg.debounce_s {
                     self.outage_since = None;
                     self.qualifying_since = None;
+                    // The episode the wake belonged to is over. The next outage
+                    // is an ordinary outage, whoever woke the machine.
+                    self.wake_at = None;
+                    self.wake_armed = false;
                 }
             }
         }
@@ -321,6 +376,23 @@ impl State {
         if !stale && !o.on_battery {
             self.qualifying_since = None;
             return Action::Warn;
+        }
+
+        // --- the wake route -----------------------------------------------
+        // Associated once, inside the window, then sticky for the rest of the
+        // outage: the grace period can outlast the attribution window and the
+        // decision must not un-decide itself mid-countdown. No settle, no
+        // debounce -- the machine woke by itself onto a confirmed outage, and
+        // the whole point is not spending the battery holding up an idle box.
+        if !self.wake_armed
+            && self
+                .wake_at
+                .is_some_and(|w| o.now_s.saturating_sub(w) <= WAKE_ATTRIBUTION_S)
+        {
+            self.wake_armed = true;
+        }
+        if self.wake_armed && cfg.shutdown_on_wake {
+            return Action::Shutdown(Why::Wake);
         }
 
         // --- the backstop -----------------------------------------------
@@ -398,7 +470,8 @@ mod tests {
             shutdown_imminent: false,
             charge: Some(100),
             runtime_s: Some(2600),
-            }
+            wake: WakeEvent::None,
+        }
     }
 
     fn battery(now_s: u64, charge: u8, runtime_s: u16) -> Observation {
@@ -409,6 +482,7 @@ mod tests {
             shutdown_imminent: false,
             charge: Some(charge),
             runtime_s: Some(runtime_s),
+            wake: WakeEvent::None,
         }
     }
 
@@ -705,6 +779,85 @@ mod tests {
     #[test]
     fn an_unbounded_backstop_is_not_a_backstop() {
         assert!(Config { max_on_battery_s: u64::MAX, ..cfg() }.validate().is_err());
+    }
+
+    /// Found by review. `shutdown_on_wake` used to live outside the policy as a
+    /// bare commitment flag, and the very next pass observed a non-shutdown
+    /// action and cancelled it -- the option could never actually fire. Routed
+    /// through the policy it uses the same announce, grace and cancel machinery
+    /// as every other reason.
+    #[test]
+    fn waking_alone_onto_battery_shuts_down_promptly_when_opted_in() {
+        let c = Config { shutdown_on_wake: true, ..cfg() };
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        // The resume is noticed before the first post-resume reading lands...
+        s.observe(&Observation { wake: WakeEvent::Alone, ..mains(10) }, &c);
+        // ...and the first believed reading says battery. No settle, no
+        // debounce: the whole point is not spending the battery on an idle box.
+        assert_eq!(s.observe(&battery(12, 90, 2000), &c), Action::Shutdown(Why::Wake));
+        // Sticky past the attribution window: the grace period may outlast it
+        // and the decision must not un-decide itself mid-countdown.
+        for t in 13..13 + WAKE_ATTRIBUTION_S * 2 {
+            assert!(s.observe(&battery(t, 90, 2000), &c).is_shutdown(), "un-decided at t={t}");
+        }
+    }
+
+    #[test]
+    fn the_wake_route_is_off_by_default() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&Observation { wake: WakeEvent::Alone, ..mains(10) }, &c);
+        assert_eq!(s.observe(&battery(12, 90, 2000), &c), Action::Warn);
+    }
+
+    /// Windows adds the user-present broadcast when a person was involved,
+    /// sometimes only once they touch the machine. Whatever the automatic
+    /// broadcast already caused, a person present means the premise is gone.
+    #[test]
+    fn a_person_showing_up_cancels_the_wake_shutdown() {
+        let c = Config { shutdown_on_wake: true, ..cfg() };
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&Observation { wake: WakeEvent::Alone, ..mains(10) }, &c);
+        assert!(s.observe(&battery(12, 90, 2000), &c).is_shutdown());
+        let a = s.observe(&Observation { wake: WakeEvent::Attended, ..battery(13, 90, 2000) }, &c);
+        assert!(!a.is_shutdown(), "still shutting down with a person present");
+    }
+
+    /// An unattended wake on healthy mains -- Windows Update at 3 a.m. -- must
+    /// not arm a prompt shutdown for an outage that starts hours later.
+    #[test]
+    fn an_unattended_wake_onto_mains_expires() {
+        let c = Config { shutdown_on_wake: true, ..cfg() };
+        let mut s = State::new();
+        s.observe(&Observation { wake: WakeEvent::Alone, ..mains(0) }, &c);
+        for t in 1..=WAKE_ATTRIBUTION_S + 1 {
+            s.observe(&mains(t), &c);
+        }
+        let a = s.observe(&battery(WAKE_ATTRIBUTION_S + 2, 90, 2000), &c);
+        assert_eq!(a, Action::Warn, "an expired wake still armed the shortcut");
+    }
+
+    /// Mains returning cancels a wake shutdown exactly like any other, and the
+    /// wake does not survive the recovery to shortcut the *next* outage.
+    #[test]
+    fn mains_returning_retires_the_wake_route() {
+        let c = Config { shutdown_on_wake: true, ..cfg() };
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&Observation { wake: WakeEvent::Alone, ..battery(1, 90, 2000) }, &c);
+        assert!(s.observe(&battery(2, 90, 2000), &c).is_shutdown());
+        for t in 3..3 + c.debounce_s + 1 {
+            let a = s.observe(&mains(t), &c);
+            assert!(!a.is_shutdown(), "wake shutdown survived fresh mains at t={t}");
+        }
+        assert!(!s.on_battery());
+        // A second outage still inside the attribution window runs the normal
+        // route: the episode the wake belonged to ended when mains held.
+        let t = 3 + c.debounce_s + 2;
+        assert_eq!(s.observe(&battery(t, 90, 2000), &c), Action::Warn);
     }
 
     /// Found by review. During the mains-return hysteresis the latch is still
