@@ -212,19 +212,47 @@ pub fn write(dir: &Path, st: &Status) -> std::io::Result<()> {
     std::fs::rename(&tmp, &final_path)
 }
 
+/// How old the file can be and still count as the agent speaking.
+///
+/// The agent rewrites it at least every five seconds while running, so this is
+/// several missed cycles. It is what keeps a dead agent from leaving a
+/// permanent red countdown: a `pending` record nobody is updating is not a
+/// pending shutdown, it is a crash that happened to occur mid-grace.
+pub const FRESH_FOR_S: u64 = 20;
+
 /// Read it from wherever it is, or `None`.
 ///
 /// Looks in both candidate directories for the same reason the tray's log
-/// lookup does: it has no way to know which install shape is in use.
+/// lookup does: it has no way to know which install shape is in use. The
+/// **newest fresh** file wins rather than the first that parses, because a
+/// stale `%ProgramData%` record left behind by a removed machine-wide install
+/// would otherwise shadow a live per-user agent forever.
 pub fn read() -> Option<Status> {
-    for dir in crate::logfile::candidate_dirs() {
-        if let Ok(text) = std::fs::read_to_string(path_in(&dir)) {
-            if let Some(st) = Status::parse(&text) {
-                return Some(st);
-            }
+    let paths: Vec<PathBuf> = crate::logfile::candidate_dirs().iter().map(|d| path_in(d)).collect();
+    freshest(&paths, std::time::Duration::from_secs(FRESH_FOR_S))
+}
+
+fn freshest(paths: &[PathBuf], max_age: std::time::Duration) -> Option<Status> {
+    let now = std::time::SystemTime::now();
+    let mut best: Option<(std::time::SystemTime, Status)> = None;
+    for path in paths {
+        let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+            continue;
+        };
+        // A clock that says the file is from the future reads as age zero:
+        // fresh, which is the direction that keeps the warning alive.
+        let age = now.duration_since(modified).unwrap_or_default();
+        if age > max_age {
+            continue;
+        }
+        if best.as_ref().is_some_and(|(t, _)| *t >= modified) {
+            continue;
+        }
+        if let Some(st) = std::fs::read_to_string(path).ok().and_then(|t| Status::parse(&t)) {
+            best = Some((modified, st));
         }
     }
-    None
+    best.map(|(_, st)| st)
 }
 
 #[cfg(test)]
@@ -318,6 +346,49 @@ end
 "));
             assert_eq!(Status::parse(&text), None, "accepted {bad:?}");
         }
+    }
+
+    /// A record the agent has stopped rewriting is not the agent speaking. A
+    /// tray that trusted a `pending` file of any age sat in a red countdown
+    /// forever after the agent died mid-grace.
+    #[test]
+    fn a_stale_record_is_not_a_status() {
+        let dir = std::env::temp_dir().join("jdups-status-fresh-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, &sample()).unwrap();
+        let paths = vec![path_in(&dir)];
+        let long = std::time::Duration::from_secs(3600);
+        assert_eq!(freshest(&paths, long), Some(sample()));
+        assert_eq!(
+            freshest(&paths, std::time::Duration::ZERO),
+            None,
+            "a record older than the window still counted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two installs can leave two files, and the first directory searched used
+    /// to win outright -- a stale machine-wide record shadowing a live
+    /// per-user agent. The newest wins.
+    #[test]
+    fn the_newest_of_two_records_wins() {
+        let a = std::env::temp_dir().join("jdups-status-two-a");
+        let b = std::env::temp_dir().join("jdups-status-two-b");
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        let older = Status { seq: 1, ..sample() };
+        let newer = Status { seq: 2, ..sample() };
+        write(&a, &older).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        write(&b, &newer).unwrap();
+        let paths = vec![path_in(&a), path_in(&b)];
+        let long = std::time::Duration::from_secs(3600);
+        assert_eq!(freshest(&paths, long).map(|s| s.seq), Some(2));
+        // ...whichever order the directories are searched in.
+        let paths = vec![path_in(&b), path_in(&a)];
+        assert_eq!(freshest(&paths, long).map(|s| s.seq), Some(2));
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 
     /// `end` ends it. Two records in one file -- an interrupted rename, a double

@@ -52,6 +52,14 @@ const WM_SNAPSHOT: u32 = WM_APP + 2;
 const WM_TEST_BALLOON: u32 = WM_APP + 3;
 /// Drives the countdown while a shutdown is pending, and only then.
 const TIMER_COUNTDOWN: usize = 1;
+/// Polls the agent's status file once a second, always.
+///
+/// The file cannot be event-driven from here: the agent arming a shutdown
+/// changes nothing the *device* reports, and `WM_SNAPSHOT` only arrives when
+/// the device snapshot changes -- which, on battery with a steady load and the
+/// smoother doing its job, can be most of a minute. A warning that waits for
+/// the next snapshot is a warning that can arrive after the shutdown.
+const TIMER_AGENT: usize = 2;
 
 /// `WM_USER`-based notification-icon events windows-sys doesn't surface.
 const NIN_SELECT: u32 = 0x0400;
@@ -102,6 +110,10 @@ struct App {
     /// The last countdown value actually painted, so the timer can fire often
     /// without repainting the icon four times a second.
     last_countdown_shown: Option<u64>,
+    /// Whether the notification icon is actually in the tray. `NIM_MODIFY`
+    /// cannot re-create a deleted icon, so once an add fails the only recovery
+    /// is another `NIM_ADD`, retried from the agent timer.
+    icon_added: bool,
     /// Whether the agent that published the pending shutdown can actually act.
     /// The menu and the notification have to say "would" rather than "will"
     /// while it cannot, or a dry run reads as an emergency.
@@ -326,6 +338,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             agent_seq: None,
             pending_until: None,
             last_countdown_shown: None,
+            icon_added: false,
             agent_armed: false,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
@@ -335,6 +348,9 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
 
         add_icon(app, true);
         refresh(app);
+        // The agent's warning must not wait for the device to say something
+        // new; see TIMER_AGENT.
+        SetTimer(hwnd, TIMER_AGENT, 1_000, None);
         if test_balloon {
             balloon(app, "UPS Status", "Test notification.");
         }
@@ -458,10 +474,12 @@ unsafe fn add_icon(app: *mut App, patient: bool) -> bool {
         }
         std::thread::sleep(Duration::from_millis(1000));
     }
+    unsafe { (*app).icon_added = added };
     if !added {
         // Deliberately not marking the icon as present. `icon_key` is left
         // alone by the caller so the next state change retries rather than
-        // deciding it already drew this.
+        // deciding it already drew this, and the agent timer keeps retrying
+        // the add itself -- NIM_MODIFY cannot resurrect a missing icon.
         return false;
     }
 
@@ -594,8 +612,6 @@ unsafe fn check_agent(app: *mut App) {
 
     // The countdown first, and independently of the announcement. These are
     // different jobs: the notification fires once, the icon has to keep moving.
-    // The countdown first, and independently of the announcement. These are
-    // different jobs: the notification fires once, the icon has to keep moving.
     //
     // **The deadline is latched, not re-derived.** The agent publishes whole
     // seconds several times a second, so recomputing `now + n` on every read
@@ -607,7 +623,9 @@ unsafe fn check_agent(app: *mut App) {
     const DRIFT_TOLERANCE_MS: i64 = 2_000;
     let until = match (st.phase, st.seconds_left) {
         (Phase::Pending, Some(n)) => {
-            let fresh = unsafe { GetTickCount64() } + n * 1000;
+            // Clamped: the writer is trusted (the file is SYSTEM-ACLed) but an
+            // absurd value must saturate the icon at 99, not overflow the add.
+            let fresh = unsafe { GetTickCount64() } + n.min(86_400) * 1000;
             match unsafe { (*app).pending_until } {
                 Some(held) if (held as i64 - fresh as i64).abs() <= DRIFT_TOLERANCE_MS => Some(held),
                 _ => Some(fresh),
@@ -630,7 +648,6 @@ unsafe fn check_agent(app: *mut App) {
     if seen == Some(st.seq) {
         return;
     }
-    unsafe { (*app).agent_seq = Some(st.seq) };
 
     let dry = !st.armed;
     let reason = st.reason.unwrap_or_else(|| "the UPS is running low".into());
@@ -654,9 +671,18 @@ unsafe fn check_agent(app: *mut App) {
                 ("Shutting down now".to_string(), "The UPS is out of runtime.".to_string())
             }
         }
-        Event::None => return,
+        Event::None => {
+            unsafe { (*app).agent_seq = Some(st.seq) };
+            return;
+        }
     };
-    unsafe { balloon(app, &title, &body) };
+    // Seen means *delivered*. Marking the sequence before the toast went up
+    // swallowed the warning for good whenever the icon happened to be absent,
+    // an Explorer restart being the usual reason; leaving it unseen makes the
+    // next poll redeliver.
+    if unsafe { balloon(app, &title, &body) } {
+        unsafe { (*app).agent_seq = Some(st.seq) };
+    }
 }
 
 /// Seconds until the pending shutdown, or `None` when none is pending.
@@ -740,7 +766,7 @@ fn tooltip(s: &Snapshot) -> String {
     t
 }
 
-unsafe fn balloon(app: *mut App, title: &str, text: &str) {
+unsafe fn balloon(app: *mut App, title: &str, text: &str) -> bool {
     // No `NIIF_USER`, and that is the point.
     //
     // There are two icons on a toast and they are not interchangeable. The one
@@ -770,7 +796,7 @@ unsafe fn balloon(app: *mut App, title: &str, text: &str) {
         set_field(&mut nid.szInfo, text);
         nid.dwInfoFlags = NIIF_NONE;
         nid.hBalloonIcon = core::ptr::null_mut();
-        Shell_NotifyIconW(NIM_MODIFY, nid);
+        Shell_NotifyIconW(NIM_MODIFY, nid) != 0
     }
 }
 
@@ -1139,6 +1165,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             unsafe { check_agent(app) };
             0
         }
+        WM_TIMER if wp == TIMER_AGENT => {
+            unsafe { check_agent(app) };
+            // The icon can only be restored by another NIM_ADD; a failed add
+            // at logon or after an Explorer crash used to leave the tray
+            // running invisibly for the rest of the session.
+            if !unsafe { (*app).icon_added } && unsafe { add_icon(app, false) } {
+                unsafe { (*app).icon_key = None };
+                unsafe { refresh(app) };
+            }
+            0
+        }
         WM_TIMER if wp == TIMER_COUNTDOWN => {
             // Fires four times a second so the digit changes promptly when it
             // should, but repaints only when it actually differs. A one-second
@@ -1169,6 +1206,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // leaves it running with no icon until Explorer restarts.
             if wp != 0 {
                 unsafe { Shell_NotifyIconW(NIM_DELETE, &(*app).nid) };
+                unsafe { (*app).icon_added = false };
             }
             0
         }
