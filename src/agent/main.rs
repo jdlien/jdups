@@ -1,15 +1,15 @@
 //! jdups-agent — decides whether this machine should shut down, and says so.
 //!
-//! **It cannot shut anything down yet.** `armed = true` is refused at startup,
-//! on purpose: the decision, the config boundary and the log are one change, and
-//! the shutdown transaction is another, with its own testing ladder. Shipping
-//! them together would mean the first time the transaction runs is also the
-//! first time the whole thing has ever run.
+//! **Dry run unless told otherwise.** `armed = false` is the default and what a
+//! missing config means, so no accident of packaging can produce an agent that
+//! acts. In that mode it decides, logs what it would have done, and touches
+//! nothing -- which is the cheapest evidence available for choosing thresholds,
+//! since ones picked on a bench are guesses and ones picked from this machine's
+//! own power are not.
 //!
-//! What it is for right now is the cheapest evidence available: point it at the
-//! real UPS, leave it for weeks, and read what it *would* have done. Thresholds
-//! chosen on the bench are guesses. Thresholds chosen from a month of this
-//! machine's own power are not.
+//! Armed, it runs the transaction in `shutdown.rs`. **PowerChute must be
+//! disarmed first**: both write the same UPS countdown register and the last
+//! writer wins.
 //!
 //! A console binary, like `jdups.exe` and for the same reason: the exit code and
 //! stderr are the whole interface while this is being debugged. It becomes a
@@ -18,6 +18,7 @@
 
 mod journal;
 mod log;
+mod shutdown;
 mod watch;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,9 +40,9 @@ USAGE:
     --check          Validate the config, print what it resolves to, and exit
     --print-config   Print a commented default config file to stdout
 
-It runs in dry run: it decides, it logs, and it does not act. Arming is
-refused until the shutdown transaction exists. See docs/implementation-plan.md,
-Phase 8.
+It runs in dry run unless the config says `armed = true`. Armed, it can shut
+this machine down, and PowerChute must be disarmed first: both write the same
+UPS countdown register. See docs/implementation-plan.md, Phase 8.
 ";
 
 fn main() {
@@ -117,7 +118,7 @@ fn main() {
         println!(
             "\nmode     {}",
             if settings.armed {
-                "ARMED, which this build refuses; see --help"
+                "ARMED: it will shut this machine down. Disarm PowerChute first."
             } else {
                 "dry run: decides and logs, does not act"
             }
@@ -125,17 +126,24 @@ fn main() {
         return;
     }
 
-    // --- arming is refused, loudly ----------------------------------------
-    // Failing closed and saying why, rather than quietly running dry when the
-    // file says armed. Somebody who wrote `armed = true` believes their machine
-    // is protected, and letting them keep believing that is the worst outcome
-    // available here.
+    // --- arming: allowed now, and said out loud ---------------------------
+    // This used to refuse, because the transaction did not exist and an agent
+    // that quietly ran dry while its config said armed would be the worst
+    // outcome available: somebody believing their machine is protected when it
+    // is not. It exists now, so this warns instead.
+    //
+    // The interlock cannot be checked from here, so it is stated. PowerChute
+    // and jdups both write the same UPS countdown register, and the last writer
+    // wins -- two armed agents can extend a countdown Windows is already
+    // shutting down against, or cancel one the other is relying on. Whether
+    // PowerChute is *armed* is a setting inside its own configuration, not
+    // something visible from outside, so no amount of service-poking would
+    // answer it honestly.
     if settings.armed {
-        eprintln!("jdups-agent: {} says armed = true, and this build cannot act on it.", path.display());
-        eprintln!("             The shutdown transaction is not implemented yet, so an armed");
-        eprintln!("             agent would be a false sense of protection. Set armed = false");
-        eprintln!("             to run in dry run. Keep PowerChute armed either way.");
-        std::process::exit(2);
+        eprintln!("jdups-agent: ARMED. This agent can shut this machine down.");
+        eprintln!("             PowerChute must be set to \"Do not shut down in the event of");
+        eprintln!("             a power outage\" first. Both write the same UPS countdown and");
+        eprintln!("             the last writer wins.");
     }
 
     // --- singleton ---------------------------------------------------------

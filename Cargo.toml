@@ -56,6 +56,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Registry",            # the AppUserModelID registration
+    # --- the shutdown transaction -----------------------------------------
+    "Win32_System_Shutdown",            # InitiateSystemShutdownExW, Abort
+    "Win32_Security",                   # AdjustTokenPrivileges (already above)
 ] }
 
 [profile.release]

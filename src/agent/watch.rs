@@ -27,6 +27,7 @@ use jdups::policy::{Observation, State};
 use jdups::status::{self, Event, Phase, Status};
 
 use crate::journal::{Journal, Level, Tick};
+use crate::shutdown;
 use crate::log;
 
 /// How long the parked read waits before looping.
@@ -82,6 +83,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut device: Option<hid::raw::Device> = None;
     let mut backoff = RETRY_MIN;
     let mut device_ok = false;
+    let mut reconciled = false;
     let mut last_poll = Instant::now() - POLL_EVERY;
 
     // The last thing each field was seen to be. Held across ticks so a poll
@@ -113,6 +115,20 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     }
                     device_ok = true;
                     device = Some(d);
+
+                    // Once, on the first open. If a previous run armed the UPS
+                    // and the machine did not go down, a countdown is running
+                    // against a live machine right now.
+                    if !reconciled {
+                        reconciled = true;
+                        let d = device.as_ref().unwrap();
+                        let on_mains = d
+                            .feature(report::PRESENT_STATUS)
+                            .ok()
+                            .map(|b| !d.status_of(&b, false).on_battery())
+                            .unwrap_or(false);
+                        shutdown::reconcile(d, &opts.dir, on_mains, &|m| say(Level::Act, m));
+                    }
                 }
                 Err(e) => {
                     if device_ok {
@@ -224,17 +240,34 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 }
                 if waited >= cfg.warn_before_s && published.event != Event::Shutdown {
                     event = Event::Shutdown;
-                    // The transaction goes here, and does not exist yet. Arming
-                    // is refused at startup so `dry_run` is always true today;
-                    // naming the site beats implying it.
-                    say(
-                        Level::Act,
-                        if dry_run {
-                            "the grace period is up: this is where it would shut down"
-                        } else {
-                            "the grace period is up, and the shutdown transaction is not written yet"
-                        },
-                    );
+                    if dry_run {
+                        say(Level::Act, "the grace period is up: this is where it would shut down");
+                    } else {
+                        // Publish *before* acting. Windows starts tearing this
+                        // process down moments later, and a tray that never
+                        // heard the shutdown began would sit showing a
+                        // countdown that had already run out.
+                        publish(
+                            &opts.dir, &mut published, &mut last_publish, true,
+                            Phase::Pending, Some(0), action, Event::Shutdown,
+                        );
+                        match shutdown::execute(dev, &opts.dir, cfg.os_shutdown_s, &|m| {
+                            say(Level::Act, m)
+                        }) {
+                            shutdown::Outcome::Committed { ups_cutoff_s } => say(
+                                Level::Act,
+                                &format!("committed: Windows is going down, UPS cuts output in {ups_cutoff_s} s"),
+                            ),
+                            shutdown::Outcome::Aborted(why) => {
+                                // Nothing is armed and the machine is still up.
+                                // Do not retry on the next pass: whatever
+                                // stopped it will stop it again, and a loop
+                                // hammering InitiateSystemShutdown is worse than
+                                // being honest that it failed.
+                                say(Level::Act, &format!("SHUTDOWN FAILED, machine stays up: {why}"));
+                            }
+                        }
+                    }
                 }
             }
             _ => {

@@ -196,6 +196,26 @@ order of effort:
 - **A borderless always-on-top window** on the active monitor. Genuinely hard to
   miss, still not blocking, and the most work by a wide margin.
 
+## Pinned: an alarm toggle in the tray
+
+**Confirmed possible, not speculation.** `AudibleAlarmControl` (`0084:5A`,
+reports 24 and 120) takes 1 = disabled, 2 = enabled, 3 = muted, and it was
+round-tripped 1 → 2 → 1 on the real unit with readback confirmation. It needs no
+elevation: the tray already opens the device `ReadWrite` and the write succeeded
+from an ordinary shell.
+
+So a checkable menu item is a small piece of work, and a genuinely nice one --
+the vendor makes you load a web app to silence a beeping UPS at 3 a.m.
+
+Two things to get right when it is built:
+
+- **Write 24, then read it back with the settle loop** and reflect what the
+  device actually holds, not what was asked for. Both 24 and 120 mirror the same
+  value, so either can confirm.
+- **The menu item is a write**, and every other item in that menu is a read that
+  copies to the clipboard. It should not be possible to change the alarm by
+  misclicking a row while reaching for the readout.
+
 ## Worth not losing
 
 Two threads that live only in conversation so far.

@@ -87,6 +87,13 @@ pub struct Config {
     pub max_on_battery_s: u64,
     /// A reading older than this is not evidence of anything.
     pub stale_after_s: u64,
+    /// How long Windows is given to shut down, in seconds.
+    ///
+    /// This is what the UPS countdown is sized from, and it is not a preference:
+    /// it is how long this machine actually takes to shut down, including the
+    /// hibernation file Fast Startup may write. Cutting power mid-write is how a
+    /// corrupt resume happens. PowerChute's own default for this unit is 120.
+    pub os_shutdown_s: u32,
     /// Warn for this long before actually shutting down.
     ///
     /// The decision is made, announced, and only then acted on. PowerChute shows
@@ -117,6 +124,7 @@ impl Default for Config {
             max_on_battery_s: 30 * 60,
             stale_after_s: 30,
             warn_before_s: 60,
+            os_shutdown_s: 120,
         }
     }
 }
@@ -149,6 +157,12 @@ impl Config {
         // Not bounded below: zero is a legitimate choice for a machine nobody
         // sits at, where the warning has no one to reach and the seconds are
         // better spent shutting down.
+        if self.os_shutdown_s < 30 {
+            return Err("os_shutdown_s below 30 will cut power mid-shutdown");
+        }
+        if self.os_shutdown_s > 1800 {
+            return Err("os_shutdown_s above half an hour outlasts any battery");
+        }
         if self.warn_before_s > 600 {
             return Err("warn_before_s above ten minutes spends the battery on a notification");
         }

@@ -61,6 +61,7 @@ impl Settings {
             format!("max_on_battery_s = {}", p.max_on_battery_s),
             format!("stale_after_s = {}", p.stale_after_s),
             format!("warn_before_s = {}", p.warn_before_s),
+            format!("os_shutdown_s = {}", p.os_shutdown_s),
         ]
     }
 }
@@ -173,6 +174,7 @@ pub fn parse(text: &str) -> Result<Settings, Vec<String>> {
             "max_on_battery_s" => num(value).map(|v| s.policy.max_on_battery_s = v),
             "stale_after_s" => num(value).map(|v| s.policy.stale_after_s = v),
             "warn_before_s" => num(value).map(|v| s.policy.warn_before_s = v),
+            "os_shutdown_s" => num(value).map(|v| s.policy.os_shutdown_s = v),
             other => Err(format!("unknown setting `{other}`")),
         };
         if let Err(e) = r {
@@ -256,6 +258,13 @@ pub const TEMPLATE: &str = r#"# jdups agent configuration.
 # nobody sits at: the seconds come out of the runtime budget either way, so a
 # warning with no one to reach is runtime spent for nothing.
 # warn_before_s = 60
+
+# How long Windows is given to shut down, in seconds. The UPS countdown is
+# sized from this, so it is not a preference: it is how long this machine
+# actually takes, including any hibernation file Fast Startup writes. Cutting
+# power mid-write is how a corrupt resume happens. Measure it and leave margin.
+# PowerChute's own default for this unit is 120.
+# os_shutdown_s = 120
 "#;
 
 #[cfg(test)]
