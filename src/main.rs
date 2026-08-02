@@ -273,12 +273,7 @@ fn run_set(serial: Option<&str>, id: Option<u8>, value: Option<i16>) -> i32 {
         return 2;
     };
 
-    const COUNTDOWN: [u8; 3] = [
-        report::DELAY_BEFORE_SHUTDOWN,
-        report::APC_SHUTDOWN_COUNTDOWN,
-        report::APC_SHUTDOWN_ARMED,
-    ];
-    if COUNTDOWN.contains(&id) && value != -1 {
+    if refuses_to_arm(id, value) {
         eprintln!("jdups: report {id} arms the UPS to cut its own output, and this will not do that.");
         eprintln!("       -1 cancels a countdown and is allowed. Arming belongs in the agent,");
         eprintln!("       where a failure half way through can be undone.");
@@ -320,6 +315,20 @@ fn run_set(serial: Option<&str>, id: Option<u8>, value: Option<i16>) -> i32 {
             1
         }
     }
+}
+
+/// The registers that arm the UPS to cut its own output, and the one value,
+/// -1 = cancel, that is safe to write into them. Report 66 is the standard
+/// DelayBeforeShutdown declared a second time, and mirror pairs on this unit
+/// are write-equivalent, so it is guarded exactly like 21.
+fn refuses_to_arm(id: u8, value: i16) -> bool {
+    const COUNTDOWN: [u8; 4] = [
+        report::DELAY_BEFORE_SHUTDOWN,
+        report::DELAY_BEFORE_SHUTDOWN_2,
+        report::APC_SHUTDOWN_COUNTDOWN,
+        report::APC_SHUTDOWN_ARMED,
+    ];
+    COUNTDOWN.contains(&id) && value != -1
 }
 
 /// What the descriptor calls a report, where it names it at all.
@@ -654,4 +663,30 @@ fn cmd_probe(dev: &raw::Device) -> i32 {
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Found by review. Report 66 is the standard DelayBeforeShutdown declared
+    /// a second time, and mirror pairs on this unit are write-equivalent -- so
+    /// `--set 66 120` sailed past a guard that listed only 21, 64 and 65 and
+    /// would have armed a countdown on a live machine.
+    #[test]
+    fn every_countdown_mirror_refuses_to_arm() {
+        for id in [
+            report::DELAY_BEFORE_SHUTDOWN,
+            report::DELAY_BEFORE_SHUTDOWN_2,
+            report::APC_SHUTDOWN_ARMED,
+            report::APC_SHUTDOWN_COUNTDOWN,
+        ] {
+            assert!(refuses_to_arm(id, 120), "report {id} accepted an arming value");
+            assert!(refuses_to_arm(id, 0), "report {id} accepted zero, which cuts output now");
+            assert!(!refuses_to_arm(id, -1), "report {id} refused the safe cancel");
+        }
+        // The writes --set exists for stay allowed.
+        assert!(!refuses_to_arm(24, 2), "the alarm toggle got caught in the countdown guard");
+        assert!(!refuses_to_arm(120, 1));
+    }
 }

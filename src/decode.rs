@@ -37,12 +37,18 @@ pub mod report {
     pub const HIGH_TRANSFER: u8 = 51;
     /// APC vendor `FF86:52`, 0..13. Last transfer reason.
     pub const LAST_TRANSFER: u8 = 54;
-    /// DelayBeforeShutdown (`84:57`), i16, -1 = none scheduled. Also on 66.
+    /// DelayBeforeShutdown (`84:57`), i16, -1 = none scheduled. Also on
+    /// `DELAY_BEFORE_SHUTDOWN_2`.
     ///
     /// **The standard register, and PowerChute does not use it.** Observed
     /// sitting at -1 through an entire vendor-driven shutdown; see
     /// `APC_SHUTDOWN_COUNTDOWN` for the one that actually works on this unit.
     pub const DELAY_BEFORE_SHUTDOWN: u8 = 21;
+    /// The same `84:57` usage, declared a second time by the descriptor.
+    /// Mirror pairs on this unit are write-equivalent -- the alarm's 24/120
+    /// were round-tripped to prove it -- so anything that guards writes to
+    /// report 21 has to guard this one identically.
+    pub const DELAY_BEFORE_SHUTDOWN_2: u8 = 66;
 
     /// AudibleAlarmControl (`84:5A`), 1..3. Also mirrored on 120.
     ///
