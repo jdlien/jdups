@@ -48,6 +48,9 @@ pub struct Options {
     pub serial: Option<String>,
     /// Echo every line to stdout as well. On by default when run from a console.
     pub echo: bool,
+    /// Suspend/resume notifications, when running as a service. `None` as a
+    /// console process or a scheduled task, neither of which can be told.
+    pub wake: Option<Arc<crate::service::Wake>>,
 }
 
 pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
@@ -114,6 +117,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     // Monotonic second of the last transaction attempt, so a failure retries
     // rather than latching shut.
     let mut last_attempt: Option<u64> = None;
+    let mut last_wake_seq: u32 = 0;
 
     while !stop.load(Ordering::SeqCst) {
         // **Per field, not one bit for all of them.** A single `fresh` flag let
@@ -279,6 +283,36 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
         let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
         let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
+
+        // --- did we just wake into an outage? --------------------------------
+        // Only a service is told this. If the machine resumed with no sign of a
+        // person and it is on battery, the UPS is almost certainly what woke it:
+        // nobody is here, and spending twenty-five more minutes of battery
+        // holding up an idle machine is backwards. Opt-in, because the wake path
+        // is hard to exercise and the conservative default is to do nothing
+        // surprising.
+        if let Some(w) = opts.wake.as_ref() {
+            let seq = w.seq.load(Ordering::SeqCst);
+            if seq != last_wake_seq {
+                last_wake_seq = seq;
+                let alone = w.resumed_alone.load(Ordering::SeqCst);
+                say(
+                    Level::Info,
+                    if alone {
+                        "resumed from sleep with no user present"
+                    } else {
+                        "resumed from sleep"
+                    },
+                );
+                if alone && cfg.shutdown_on_wake && state.on_battery() && committed_at.is_none() {
+                    say(
+                        Level::Act,
+                        "woke onto battery with nobody here; shutting down rather than                          spending the battery on an idle machine",
+                    );
+                    committed_at = Some(o.now_s);
+                }
+            }
+        }
 
         // --- do not let it sleep through an outage --------------------------
         // Driven off the latched outage state rather than the raw reading, so a

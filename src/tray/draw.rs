@@ -688,6 +688,12 @@ fn draw_digits(
     n: u8,
     aa: bool,
 ) {
+    // Clamped here as well as by every caller. Three digits would index a
+    // ten-element font table with `n / 10 >= 10` and panic, and a panic in a
+    // UPS monitor is a UPS monitor that has stopped monitoring. Both callers do
+    // clamp today -- `Reading::icon_digits` and `gauge_pending` -- so this is
+    // the belt to that pair of braces, not a live bug.
+    let n = n.min(99);
     let digits: Vec<usize> = if n >= 10 {
         vec![(n / 10) as usize, (n % 10) as usize]
     } else {

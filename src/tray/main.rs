@@ -333,7 +333,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
         let app = Box::into_raw(app);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
 
-        add_icon(app);
+        add_icon(app, true);
         refresh(app);
         if test_balloon {
             balloon(app, "UPS Status", "Test notification.");
@@ -429,7 +429,7 @@ unsafe fn init_dark_mode() {
     }
 }
 
-unsafe fn add_icon(app: *mut App) {
+unsafe fn add_icon(app: *mut App, patient: bool) -> bool {
     let nid = unsafe { &mut (*app).nid };
     nid.cbSize = core::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = unsafe { (*app).hwnd };
@@ -439,20 +439,37 @@ unsafe fn add_icon(app: *mut App) {
     set_field(&mut nid.szTip, "UPS");
 
     // Explorer's notification area may not be ready yet at logon.
-    for attempt in 0..10 {
+    //
+    // **This sleeps, so it must never run on the UI thread with the full
+    // budget.** `TaskbarCreated` arrives in the window procedure, and retrying
+    // there for nine seconds freezes the menu, the snapshot handler and the
+    // shutdown countdown along with it. `patient` is false on that path; the
+    // recovery is retried from the next snapshot instead, which arrives within
+    // seconds anyway.
+    let tries = if patient { 10 } else { 1 };
+    let mut added = false;
+    for attempt in 0..tries {
         if unsafe { Shell_NotifyIconW(NIM_ADD, nid) } != 0 {
+            added = true;
             break;
         }
-        if attempt == 9 {
-            return;
+        if attempt + 1 == tries {
+            break;
         }
         std::thread::sleep(Duration::from_millis(1000));
+    }
+    if !added {
+        // Deliberately not marking the icon as present. `icon_key` is left
+        // alone by the caller so the next state change retries rather than
+        // deciding it already drew this.
+        return false;
     }
 
     // Must follow *every* successful add, including Explorer-restart recovery:
     // it selects the modern callback packing the WM_TRAY handler assumes.
     nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
     unsafe { Shell_NotifyIconW(NIM_SETVERSION, nid) };
+    true
 }
 
 fn gauge_for(s: &Snapshot) -> draw::Gauge {
@@ -1095,7 +1112,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     // Explorer restarted and threw away every icon; put ours back.
     if msg == unsafe { (*app).taskbar_created } {
         unsafe {
-            add_icon(app);
+            // Not patient: this is the UI thread, and a nine-second retry here
+            // stalls everything including the shutdown countdown.
+            add_icon(app, false);
             (*app).icon_key = None; // force the icon to be re-attached
             refresh(app);
         }

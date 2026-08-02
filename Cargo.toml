@@ -59,6 +59,7 @@ windows-sys = { version = "0.61", features = [
     # --- the shutdown transaction -----------------------------------------
     "Win32_System_Shutdown",            # InitiateShutdownW, Abort
     "Win32_System_Power",               # SetThreadExecutionState
+    "Win32_System_Services",            # running as a service
     "Win32_Security",                   # AdjustTokenPrivileges (already above)
 ] }
 

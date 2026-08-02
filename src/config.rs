@@ -62,6 +62,7 @@ impl Settings {
             format!("stale_after_s = {}", p.stale_after_s),
             format!("warn_before_s = {}", p.warn_before_s),
             format!("os_shutdown_s = {}", p.os_shutdown_s),
+            format!("shutdown_on_wake = {}", p.shutdown_on_wake),
         ]
     }
 }
@@ -175,6 +176,7 @@ pub fn parse(text: &str) -> Result<Settings, Vec<String>> {
             "stale_after_s" => num(value).map(|v| s.policy.stale_after_s = v),
             "warn_before_s" => num(value).map(|v| s.policy.warn_before_s = v),
             "os_shutdown_s" => num(value).map(|v| s.policy.os_shutdown_s = v),
+            "shutdown_on_wake" => flag(value).map(|v| s.policy.shutdown_on_wake = v),
             other => Err(format!("unknown setting `{other}`")),
         };
         if let Err(e) = r {
@@ -265,6 +267,17 @@ pub const TEMPLATE: &str = r#"# jdups agent configuration.
 # power mid-write is how a corrupt resume happens. Measure it and leave margin.
 # PowerChute's own default for this unit is 120.
 # os_shutdown_s = 120
+
+# If the machine wakes by itself and finds it is on battery, shut down at once
+# rather than waiting for the thresholds. The reasoning: it was asleep, nothing
+# suggests a person woke it, and it is running on battery -- so the UPS woke it,
+# nobody is here, and holding an idle machine up for another twenty-five minutes
+# spends the battery for nothing.
+#
+# Needs the agent installed as a service; a scheduled task is never told about a
+# resume. Off by default, because a setting that shuts a machine down sooner
+# than the thresholds say should be one you chose.
+# shutdown_on_wake = false
 "#;
 
 #[cfg(test)]

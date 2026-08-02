@@ -18,6 +18,7 @@
 
 mod journal;
 mod log;
+mod service;
 mod shutdown;
 mod watch;
 
@@ -37,6 +38,8 @@ USAGE:
     --serial SERIAL  Select a specific unit when more than one is attached
     -q               Do not echo to stdout; write only to the log
 
+    --service        Run under the Service Control Manager. Only meaningful when
+                     the SCM starts it; see install.ps1 -Service
     --check          Validate the config, print what it resolves to, and exit
     --print-config   Print a commented default config file to stdout
 
@@ -69,6 +72,7 @@ fn main() {
                 i += 1;
             }
             "-q" | "--quiet" => echo = false,
+            "--service" => mode = "service",
             "--check" => mode = "check",
             "--print-config" => mode = "print-config",
             "-h" | "--help" => {
@@ -155,11 +159,37 @@ fn main() {
         std::process::exit(1);
     }
 
+    let dir = dir.unwrap_or_else(jdups::logfile::default_dir);
+
+    // --- as a service ------------------------------------------------------
+    // The SCM calls back on its own thread with nothing passed in, so the
+    // settings are stashed first and the callback picks them up.
+    if mode == "service" {
+        OPTS.set((settings, dir, serial)).ok();
+        service::set_body(|stop, wake| {
+            let (settings, dir, serial) = OPTS.get().expect("options set before dispatch").clone();
+            watch::run(
+                watch::Options { settings, dir, serial, echo: false, wake: Some(wake) },
+                stop,
+            )
+        });
+        if let Err(e) = service::dispatch() {
+            eprintln!("jdups-agent: not started by the service manager ({e}).");
+            eprintln!("             Run it without --service to use it from a console,");
+            eprintln!(r"             or install it with: .\install.ps1 -Agent -Service");
+            std::process::exit(2);
+        }
+        return;
+    }
+
     let opts = watch::Options {
         settings,
-        dir: dir.unwrap_or_else(jdups::logfile::default_dir),
+        dir,
         serial,
         echo,
+        // A console process and a scheduled task are both untold about suspend
+        // and resume. Only the SCM delivers that.
+        wake: None,
     };
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -168,6 +198,9 @@ fn main() {
 
     std::process::exit(watch::run(opts, stop));
 }
+
+type Stashed = (jdups::config::Settings, std::path::PathBuf, Option<String>);
+static OPTS: std::sync::OnceLock<Stashed> = std::sync::OnceLock::new();
 
 /// `Global\`, not `Local\`: as a service this runs in a different session from
 /// anything a logged-in user starts, and a session-local name would not collide

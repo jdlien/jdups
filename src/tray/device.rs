@@ -218,11 +218,20 @@ fn run(
         let status_changed = last_status != Some(reading.status);
         let due = last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY);
         if due || status_changed {
-            sweep(dev, &mut reading);
-            last_sweep = Some(Instant::now());
+            // **Only count a sweep that actually read something.** This used to
+            // stamp the time regardless, so a UPS unplugged while its handle
+            // stayed open kept a fresh sweep age forever and the menu went on
+            // showing cached numbers as current. It also defeats the staleness
+            // rule outright, which takes the freshest of the two ages.
+            if sweep(dev, &mut reading) {
+                last_sweep = Some(Instant::now());
+            }
             last_status = Some(reading.status);
         }
 
+        // Staleness is a property of the ages, and the ages move on their own.
+        // Passing it explicitly is what lets `publish` notice the crossing
+        // without treating every tick as a change.
         publish(
             &snapshot,
             target,
@@ -276,8 +285,17 @@ fn apply_input(
 }
 
 /// The fields that are not on the input stream at all.
-fn sweep(dev: &hid::raw::Device, reading: &mut Reading) {
-    let f = |id: u8| dev.feature(id).ok();
+/// Returns whether the device answered at all.
+///
+/// The caller uses this to decide whether the sweep age advances: a sweep in
+/// which every read failed is not evidence that the UPS is still there.
+fn sweep(dev: &hid::raw::Device, reading: &mut Reading) -> bool {
+    let mut answered = false;
+    let mut f = |id: u8| {
+        let r = dev.feature(id).ok();
+        answered |= r.is_some();
+        r
+    };
 
     // Charge and runtime, which also arrive on the input stream. Read here too
     // because the stream is not guaranteed: this device stops pushing input
@@ -322,6 +340,7 @@ fn sweep(dev: &hid::raw::Device, reading: &mut Reading) {
             reading.have_status = true;
         }
     }
+    answered
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,10 +365,15 @@ fn publish(
     let changed = {
         let mut guard = slot.lock().unwrap();
         // Only the parts the UI actually renders. Ages tick constantly and
-        // would make every read look like a change.
+        // would make every read look like a change -- but **crossing into or
+        // out of stale is a change**, and comparing the readings alone missed
+        // it: a device that goes quiet while its last values happen to stay put
+        // publishes nothing, so the icon keeps showing a healthy state it no
+        // longer has any evidence for.
         let differs = guard.reading != next.reading
             || guard.device_ok != next.device_ok
-            || guard.error != next.error;
+            || guard.error != next.error
+            || guard.is_stale() != next.is_stale();
         *guard = next;
         differs
     };

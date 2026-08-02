@@ -526,7 +526,25 @@ impl Device {
             // zero-initialised at full report length, which is exactly what
             // HidD_GetFeature hands back, and the decoders length-check against
             // that. Truncating here silently breaks every field whose top byte
-            // happens to be zero.
+            // happens to be zero. That was measured, not assumed.
+            //
+            // **The cost, stated plainly:** a genuinely truncated transfer is
+            // indistinguishable from a report that simply ends in zeros, and
+            // both come back as a full-length buffer padded with zeros. So a
+            // short read can produce a plausible small value rather than an
+            // error.
+            //
+            // And the report-ID check in `decode::payload` does **not** catch
+            // it here, which is worth knowing: `IOCTL_HID_GET_FEATURE` leaves
+            // the caller-supplied first byte alone, so `buf[0] == id` is
+            // comparing our own write to itself. That check earns its keep on
+            // *input* reports, where the device chooses the ID and the stream is
+            // multiplexed. On this path it is decoration.
+            //
+            // Living with it because the alternative is measurably worse on
+            // this hardware, and because every value that matters is read
+            // repeatedly: the agent polls every two seconds and debounces, so a
+            // single fabricated sample cannot reach a decision on its own.
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,

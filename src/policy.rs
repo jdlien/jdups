@@ -100,6 +100,19 @@ pub struct Config {
     /// hibernation file Fast Startup may write. Cutting power mid-write is how a
     /// corrupt resume happens. PowerChute's own default for this unit is 120.
     pub os_shutdown_s: u32,
+    /// Shut down promptly if the machine woke by itself onto battery.
+    ///
+    /// Only a service is told about a resume, so this does nothing under a
+    /// scheduled task. When it applies, the reasoning is: the machine was
+    /// asleep, something woke it without a person involved, and it is running
+    /// on battery -- so the UPS woke it, nobody is here, and holding an idle
+    /// machine up for another twenty-five minutes spends the battery for
+    /// nothing.
+    ///
+    /// **Off by default.** The wake path is hard to exercise deliberately, and
+    /// a default that shuts a machine down sooner than the thresholds say
+    /// should be a choice somebody made rather than one they inherited.
+    pub shutdown_on_wake: bool,
     /// Warn for this long before actually shutting down.
     ///
     /// The decision is made, announced, and only then acted on. PowerChute shows
@@ -131,6 +144,7 @@ impl Default for Config {
             stale_after_s: 30,
             warn_before_s: 60,
             os_shutdown_s: 120,
+            shutdown_on_wake: false,
         }
     }
 }
