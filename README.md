@@ -39,9 +39,16 @@ Some of the shape behind those numbers:
   That is 120x the entire jdups installation, to render six numbers in a browser.
 - It ships **`ecj`, the Eclipse Java compiler**, so it can compile JSPs at
   runtime on your machine.
-- **Its notification-area icon alone uses 71.5 MB** and 8 threads. That is one
-  icon, doing the same job as ours, in 16x the memory of everything jdups
-  installs. It also does not follow the system light/dark theme. Ours does.
+- **Its notification-area icon alone uses 71.5 MB** and 8 threads -- 16x the
+  memory of everything jdups installs -- and its menu is a set of links that
+  open parts of the web app. It shows no readings and does not follow the
+  system light/dark theme.
+
+  Ours is the state: a battery whose fill is charge, whose colour is where the
+  power is coming from, and whose digits are the minutes remaining. The menu
+  carries the full readout and copies any row to the clipboard, toggles the
+  UPS's audible alarm, opens the log, and counts a pending shutdown down in
+  red. In 2.4 MB, and it respects dark mode.
 - 1.3 % of a core, continuously, is not free either — it is roughly what jdups
   costs *fifteen times over*, to poll the same device over the same USB cable.
 
