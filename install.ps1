@@ -107,6 +107,11 @@ if ($SamplerOnly -and $TrayOnly) {
 if ($Agent -and $TrayOnly) {
     throw "-Agent and -TrayOnly are mutually exclusive."
 }
+if ($SamplerOnly -and $Agent) {
+    # -SamplerOnly promises "only the sampler", and quietly registering a
+    # shutdown agent alongside it would be the worst way to break a promise.
+    throw "-SamplerOnly and -Agent are mutually exclusive."
+}
 if ($Service -and -not $Agent) {
     throw "-Service applies to the agent; pass -Agent as well."
 }
@@ -129,6 +134,11 @@ if (-not $InstallDir) {
 if (-not $LogDir) {
     $LogDir = if ($PerUser) { "$env:LOCALAPPDATA\jdups" } else { "$env:ProgramData\jdups" }
 }
+# A trailing backslash turns the closing quote into a literal on every command
+# line these end up in: --dir "D:\logs\" reaches the program as D:\logs" plus
+# whatever token came next.
+$InstallDir = $InstallDir.TrimEnd('\')
+$LogDir     = $LogDir.TrimEnd('\')
 
 # --- Self-elevate, unless we were asked not to -------------------------------
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -162,7 +172,14 @@ if (-not $admin -and -not $PerUser) {
     $sid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
     $argList += @("-TrayUser", $sid)
 
-    Start-Process -FilePath (Get-Process -Id $PID).Path -Verb RunAs -ArgumentList $argList
+    try {
+        Start-Process -FilePath (Get-Process -Id $PID).Path -Verb RunAs -ArgumentList $argList
+    } catch {
+        Write-Host ""
+        Write-Host "Elevation was declined; nothing was installed." -ForegroundColor Red
+        Write-Host "Press Enter to close."; [void][Console]::ReadLine()
+        exit 1
+    }
     return
 }
 
@@ -207,13 +224,27 @@ foreach ($exe in $src.Keys) {
     $running += Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($exe)) -ErrorAction SilentlyContinue |
                 Where-Object { $_.Path -eq (Join-Path $InstallDir $exe) }
 }
+# The tray's only window is hidden, so .NET's CloseMainWindow() finds nothing
+# and the fallback kill leaves a ghost icon until Explorer notices. Its window
+# class is findable, and WM_CLOSE is the teardown that removes the icon.
+if (-not ("Jdups.Win32" -as [type])) {
+    Add-Type -Namespace Jdups -Name Win32 -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
+[DllImport("user32.dll")]
+public static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+'@
+}
+if ($running | Where-Object { $_.Path -like "*jdups-tray.exe" }) {
+    $h = [Jdups.Win32]::FindWindowW("jdups_tray", $null)
+    if ($h -ne [IntPtr]::Zero) {
+        [void][Jdups.Win32]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
+        Start-Sleep -Milliseconds 500
+    }
+}
 foreach ($p in $running) {
     try {
-        # The tray gets a WM_CLOSE first, which is what removes its notification
-        # icon. Killing it outright leaves a ghost behind until Explorer
-        # restarts, which uninstall.ps1 already knew and this did not.
-        $p.CloseMainWindow() | Out-Null
-        Start-Sleep -Milliseconds 300
+        $p.Refresh()
         if (-not $p.HasExited) { $p | Stop-Process -Force }
         Write-Host "  stopped $(Split-Path -Leaf $p.Path)"
     } catch { Fail "stopping $($p.Path): $_" }
@@ -339,7 +370,11 @@ if ($Agent) {
         }
 
         $exe = Join-Path $InstallDir "jdups-agent.exe"
-        $args = "-q --dir `"$LogDir`""
+        # --config named explicitly, not left to the search path. With a custom
+        # -LogDir the conf written above lives somewhere the agent's built-in
+        # search never looks, so the file this installer advertises -- the one
+        # somebody will set armed = true in -- would be silently ignored.
+        $args = "-q --dir `"$LogDir`" --config `"$conf`""
         if ($Serial) { $args += " --serial $Serial" }
 
         if ($Service) {
@@ -354,29 +389,56 @@ if ($Agent) {
                 # sc.exe rather than Remove-Service, which needs PS 6+ and is
                 # not present on Windows PowerShell 5.1.
                 & sc.exe delete $AgentTask | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "sc.exe delete returned $LASTEXITCODE" }
                 Start-Sleep -Milliseconds 500
             }
-            # The scheduled-task form must not linger, or two agents fight over
-            # the singleton and one of them silently loses.
+
+            # New-Service, not `sc.exe create`. Windows PowerShell 5.1 passes
+            # the embedded quotes in $bin to sc.exe un-escaped, which shreds the
+            # image path at the space in "Program Files" -- the service either
+            # fails to create or points at C:\Program. New-Service takes the
+            # path as a .NET string and no re-quoting ever happens.
+            $bin = "`"$exe`" --service $args"
+            New-Service -Name $AgentTask -BinaryPathName $bin -DisplayName "jdups UPS agent" `
+                -StartupType Automatic `
+                -Description "Watches the UPS and shuts this machine down on a sustained power failure." | Out-Null
+            # Restart twice on failure, a minute apart, then leave it alone: the
+            # SCM repeats the *last* action forever, so the explicit "" (none)
+            # third action is what stops the loop. Quoted as one token or
+            # PowerShell eats the empty string on its way to sc.exe.
+            & sc.exe failure $AgentTask reset= 86400 actions= 'restart/60000/restart/60000/""/60000' | Out-Null
+            if ($LASTEXITCODE -ne 0) { Fail "sc.exe failure returned $LASTEXITCODE" }
+            # Count a nonzero *exit* as a failure too, not just a crash --
+            # report_exit carries the agent's exit code to the SCM for exactly
+            # this. (This flag is not about preshutdown; the preshutdown window
+            # stays at the 180 s default, far above the 20 s the agent asks for.)
+            & sc.exe failureflag $AgentTask 1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Fail "sc.exe failureflag returned $LASTEXITCODE" }
+            Start-Service -Name $AgentTask
+            Write-Host "  registered $AgentTask (Windows service, SYSTEM, automatic)"
+
+            # Only now that the service exists and started: the scheduled-task
+            # form must not linger, or two agents fight over the singleton --
+            # but removing it *before* the service was proven left a machine
+            # with no agent in any form when the create failed.
             if (Get-ScheduledTask -TaskName $AgentTask -ErrorAction SilentlyContinue) {
                 Stop-ScheduledTask -TaskName $AgentTask -ErrorAction SilentlyContinue
                 Unregister-ScheduledTask -TaskName $AgentTask -Confirm:$false
                 Write-Host "  removed the $AgentTask scheduled task (superseded by the service)"
             }
-
-            $bin = "`"$exe`" --service $args"
-            & sc.exe create $AgentTask binPath= "$bin" start= auto DisplayName= "jdups UPS agent" | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "sc.exe create returned $LASTEXITCODE" }
-            & sc.exe description $AgentTask "Watches the UPS and shuts this machine down on a sustained power failure." | Out-Null
-            # Restart twice on failure, then leave it alone rather than looping.
-            & sc.exe failure $AgentTask reset= 86400 actions= restart/60000/restart/60000/"" | Out-Null
-            # Ask for a preshutdown window long enough to finish: the default is
-            # generous, but the shutdown transaction budgets its own time.
-            & sc.exe failureflag $AgentTask 1 | Out-Null
-            Start-Service -Name $AgentTask
-            Write-Host "  registered $AgentTask (Windows service, SYSTEM, automatic)"
             $AgentIsService = $true
         } else {
+        # The mirror of the removal in the service branch: a service left over
+        # from a previous -Service install would fight this task for the
+        # singleton at every boot, each restarting its loser on a loop.
+        $svc = Get-Service -Name $AgentTask -ErrorAction SilentlyContinue
+        if ($svc) {
+            if ($svc.Status -ne 'Stopped') { Stop-Service -Name $AgentTask -Force }
+            & sc.exe delete $AgentTask | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "sc.exe delete returned $LASTEXITCODE" }
+            Write-Host "  removed the $AgentTask service (superseded by the scheduled task)"
+            Start-Sleep -Milliseconds 500
+        }
         $action = New-ScheduledTaskAction -Execute $exe -Argument $args
         if ($PerUser) {
             $me = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
@@ -492,12 +554,20 @@ if ($Agent) {
     # someone their machine was unprotected when it was armed, or -- worse --
     # the reverse.
     $armed = $false
+    $badConfig = $false
     try {
-        $check = & (Join-Path $InstallDir "jdups-agent.exe") --check 2>&1
+        $check = & (Join-Path $InstallDir "jdups-agent.exe") --check --config "$conf" 2>&1
+        # Exit 2 is "bad configuration, refusing to start": the agent is not in
+        # dry run, it is crash-looping, and saying DRY RUN here would hide it.
+        if ($LASTEXITCODE -eq 2) { $badConfig = $true }
         $armed = ($check | Select-String -Quiet "^\s*armed = true")
     } catch { }
 
-    if ($armed) {
+    if ($badConfig) {
+        Write-Host "  The agent REFUSES its configuration and cannot start. This is not" -ForegroundColor Red
+        Write-Host "  dry run; it is a crash loop. To see why:" -ForegroundColor Red
+        Write-Host "      jdups-agent.exe --check --config `"$conf`"" -ForegroundColor Red
+    } elseif ($armed) {
         Write-Host "  The agent is ARMED. It will shut this machine down on a sustained" -ForegroundColor Yellow
         Write-Host "  power failure." -ForegroundColor Yellow
         Write-Host ""

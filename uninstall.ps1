@@ -47,6 +47,21 @@ foreach ($d in $MachineDirs) { if (Test-Path $d) { $needsAdmin = $true } }
 foreach ($t in @($SamplerTask, $AgentTask)) {
     $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
     if ($task -and $task.Principal.UserId -match 'SYSTEM') { $needsAdmin = $true }
+    if (-not $task) {
+        # An unelevated Get-ScheduledTask silently *omits* SYSTEM tasks -- the
+        # task file is ACL'd against ordinary users -- so "no task" from it
+        # proves nothing. Ask the file: access denied means the task exists and
+        # is exactly the kind that needs elevation to remove; not-found means
+        # it is genuinely absent. Without this, deleting the install dirs by
+        # hand and re-running left both SYSTEM tasks behind while printing
+        # a green Done.
+        try {
+            $null = [IO.File]::GetAttributes("$env:windir\System32\Tasks\$t")
+            $needsAdmin = $true
+        } catch [System.UnauthorizedAccessException] {
+            $needsAdmin = $true
+        } catch { }
+    }
 }
 # A service always needs elevation to remove.
 if (Get-Service -Name $AgentTask -ErrorAction SilentlyContinue) { $needsAdmin = $true }
@@ -55,7 +70,14 @@ if ($needsAdmin -and -not $admin -and -not $NoElevate) {
     Write-Host "A machine-wide install is present; elevating (accept the UAC prompt)..."
     $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
     if ($Logs) { $argList += "-Logs" }
-    Start-Process -FilePath (Get-Process -Id $PID).Path -Verb RunAs -ArgumentList $argList
+    try {
+        Start-Process -FilePath (Get-Process -Id $PID).Path -Verb RunAs -ArgumentList $argList
+    } catch {
+        Write-Host ""
+        Write-Host "Elevation was declined; nothing was removed." -ForegroundColor Red
+        Write-Host "Press Enter to close."; [void][Console]::ReadLine()
+        exit 1
+    }
     return
 }
 
@@ -97,16 +119,27 @@ foreach ($d in ($MachineDirs + $UserDirs)) {
     $paths += (Join-Path $d "jdups-tray.exe")
     $paths += (Join-Path $d "jdups-agent.exe")
 }
+# The tray's only window is hidden, so .NET's CloseMainWindow() finds nothing.
+# Post WM_CLOSE to its window class instead: that is the clean teardown that
+# removes the notification icon; a kill leaves a ghost until Explorer notices.
+if (-not ("Jdups.Win32" -as [type])) {
+    Add-Type -Namespace Jdups -Name Win32 -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr FindWindowW(string lpClassName, string lpWindowName);
+[DllImport("user32.dll")]
+public static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+'@
+}
+$h = [Jdups.Win32]::FindWindowW("jdups_tray", $null)
+if ($h -ne [IntPtr]::Zero) {
+    [void][Jdups.Win32]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
+    Start-Sleep -Milliseconds 500
+}
 foreach ($name in @("jdups", "jdups-tray", "jdups-agent")) {
     Get-Process -Name $name -ErrorAction SilentlyContinue |
         Where-Object { $paths -contains $_.Path } |
         ForEach-Object {
             try {
-                # No -Force: the tray gets a clean WM_CLOSE teardown, which is
-                # what removes its notification icon. Killing it outright leaves
-                # a ghost icon behind until Explorer restarts.
-                $_.CloseMainWindow() | Out-Null
-                Start-Sleep -Milliseconds 300
                 if (-not $_.HasExited) { $_ | Stop-Process -Force }
                 Write-Host "  stopped $($_.Path)"
             } catch { Fail "stopping $($_.Path): $_" }
@@ -136,6 +169,13 @@ foreach ($d in ($MachineDirs[0], $UserDirs[0])) {
     } catch { Fail "removing binaries from ${d}: $_" }
 }
 
+# --- The tray's toast identity ------------------------------------------------
+# Registered at first run so notifications carry a name and header icon; without
+# this it outlives the uninstall as an orphan pointing at a deleted exe.
+try {
+    Remove-Item "HKCU:\Software\Classes\AppUserModelId\UPS Status" -Recurse -Force -ErrorAction SilentlyContinue
+} catch { }
+
 # --- Logs, only if asked -----------------------------------------------------
 foreach ($d in ($MachineDirs[1], $UserDirs[1])) {
     if (-not (Test-Path $d)) { continue }
@@ -145,8 +185,8 @@ foreach ($d in ($MachineDirs[1], $UserDirs[1])) {
             Write-Host "  removed $d"
         } catch { Fail "removing ${d}: $_" }
     } else {
-        $note = if (Test-Path (Join-Path $d "jdups.conf")) { " and jdups.conf" } else { "" }
-        Write-Host "  kept $d (logs$note; pass -Logs to delete it)"
+        $note = if (Test-Path (Join-Path $d "jdups.conf")) { ", jdups.conf" } else { "" }
+        Write-Host "  kept $d (logs$note and settings; pass -Logs to delete it)"
     }
 }
 
