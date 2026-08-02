@@ -27,6 +27,8 @@ USAGE:
     --serial SERIAL  Select a specific unit when more than one is attached
     --read ID[,ID]   Read feature reports by number, raw and decoded. Read-only:
                      it never writes, so it is safe against a live UPS
+    --set ID VALUE   Write a feature report and read it back. Refuses to *arm*
+                     the UPS countdown; -1, which cancels one, is always allowed
 
     --sample         Log to CSV continuously. This is the headless logger the
                      scheduled task runs; it is the only writer of the log.
@@ -46,6 +48,8 @@ fn main() {
     let mut dir: Option<std::path::PathBuf> = None;
     let mut verbose = false;
     let mut read_ids: Vec<u8> = Vec::new();
+    let mut set_id: Option<u8> = None;
+    let mut set_value: Option<i16> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -62,6 +66,12 @@ fn main() {
                 i += 1;
             }
             "--probe" => mode = "probe",
+            "--set" => {
+                mode = "set";
+                set_id = args.get(i + 1).and_then(|v| v.parse::<u8>().ok());
+                set_value = args.get(i + 2).and_then(|v| v.parse::<i16>().ok());
+                i += 2;
+            }
             "--read" => {
                 mode = "read";
                 read_ids = args
@@ -116,6 +126,7 @@ fn main() {
         "list" => cmd_list(),
         "sample" => cmd_sample(serial, interval, dir, verbose),
         "read" => run_read(serial.as_deref(), &read_ids),
+        "set" => run_set(serial.as_deref(), set_id, set_value),
         _ => run(mode, serial.as_deref(), watch_secs),
     };
     std::process::exit(code);
@@ -241,6 +252,69 @@ fn run_read(serial: Option<&str>, ids: &[u8]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// Write one feature report, and prove it took.
+///
+/// **The one place a human can change this device**, so it is deliberately
+/// awkward about the register that matters. Report 65 arms a countdown after
+/// which the UPS cuts its own output; -1 cancels one. This allows the cancel and
+/// refuses the arm, which makes the first write anyone performs a safe one: -1
+/// into a register already holding -1 proves the whole path -- privilege,
+/// encoding, readback -- and changes nothing.
+///
+/// Arming belongs in the agent's shutdown transaction, where a failure part-way
+/// through is something the code can undo. A CLI flag has no such recovery: it
+/// writes, it exits, and the countdown keeps running.
+fn run_set(serial: Option<&str>, id: Option<u8>, value: Option<i16>) -> i32 {
+    let (Some(id), Some(value)) = (id, value) else {
+        eprintln!("jdups: --set needs a report number and a value, e.g. --set 24 2");
+        return 2;
+    };
+
+    const COUNTDOWN: [u8; 3] = [
+        report::DELAY_BEFORE_SHUTDOWN,
+        report::APC_SHUTDOWN_COUNTDOWN,
+        report::APC_SHUTDOWN_ARMED,
+    ];
+    if COUNTDOWN.contains(&id) && value != -1 {
+        eprintln!("jdups: report {id} arms the UPS to cut its own output, and this will not do that.");
+        eprintln!("       -1 cancels a countdown and is allowed. Arming belongs in the agent,");
+        eprintln!("       where a failure half way through can be undone.");
+        return 2;
+    }
+
+    let dev = match hid::open(serial) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("jdups: {e}");
+            return 1;
+        }
+    };
+
+    let before = dev.feature(id).ok();
+    match dev.set_feature_i16(id, value) {
+        Ok(after) => {
+            let show = |v: Option<i16>| v.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+            let was = before
+                .as_deref()
+                .filter(|b| b.len() >= 3)
+                .map(|b| i16::from_le_bytes([b[1], b[2]]));
+            println!("report {id}  was {}  wrote {value}  now {}", show(was), show(after));
+            if after != Some(value) {
+                // Not necessarily a failure: a device is entitled to clamp into
+                // its logical range. It is always worth saying out loud, though,
+                // because "the write succeeded" and "the device holds what you
+                // asked for" are different claims.
+                println!("note: the device did not take that value verbatim.");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("jdups: writing report {id}: {e}");
+            1
+        }
     }
 }
 

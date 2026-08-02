@@ -24,7 +24,7 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SP_DEVICE_INTERFACE_DATA,
 };
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-    HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetFeature, HidD_GetHidGuid,
+    HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetFeature, HidD_SetFeature, HidD_GetHidGuid,
     HidD_GetPreparsedData, HidD_GetSerialNumberString, HidD_SetNumInputBuffers, HidP_GetCaps,
     HIDD_ATTRIBUTES, HIDP_CAPS, PHIDP_PREPARSED_DATA,
 };
@@ -549,6 +549,56 @@ impl Device {
             return Err(io::Error::last_os_error());
         }
         Ok(buf)
+    }
+
+    /// Write a feature report, and prove it took.
+    ///
+    /// **The first code in this project that changes the device.** Everything
+    /// until now has been reads, which are safe to get wrong; this is not. The
+    /// register that matters, `FF86:7D`, arms a countdown after which the UPS
+    /// cuts its own output, so a stray write here powers off whatever is plugged
+    /// into it.
+    ///
+    /// Blocking `HidD_SetFeature` rather than the bounded IOCTL path used for
+    /// reads. The bounded path exists because a read parked forever would hang
+    /// the sampler; a write is a single short transfer at a moment when the
+    /// caller has nothing else to do, and the plain API is the one whose
+    /// behaviour is documented. If it ever needs a timeout, do to it what
+    /// `--probe` does for reads: derive the CTL_CODE empirically rather than
+    /// assuming it, because the wrong encoding did not error, it silently
+    /// returned a well-formed lie.
+    ///
+    /// **Reads back and returns what the device actually holds.** A write that
+    /// reported success and did not take is the failure mode the plan calls out
+    /// by name, and the only way to know the difference is to look. Callers
+    /// compare; this does not, because "took but the device clamped it" is a
+    /// legitimate outcome the caller may want to accept.
+    pub fn set_feature(&self, report_id: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+        let len = self.info.feature_len.max(2) as usize;
+        if 1 + payload.len() > len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("report {report_id}: {} bytes will not fit in {len}", payload.len()),
+            ));
+        }
+        let mut buf = vec![0u8; len];
+        buf[0] = report_id;
+        buf[1..1 + payload.len()].copy_from_slice(payload);
+
+        let ok = unsafe { HidD_SetFeature(self.handle, buf.as_ptr() as *mut c_void, len as u32) };
+        if !ok {
+            return Err(io::Error::last_os_error());
+        }
+        self.get_feature_blocking(report_id)
+    }
+
+    /// Write a signed 16-bit value, little-endian, and say what came back.
+    ///
+    /// The shape every delay register on this device uses: `-1..32767`, where -1
+    /// means "nothing scheduled" and is how a countdown is cancelled.
+    pub fn set_feature_i16(&self, report_id: u8, value: i16) -> io::Result<Option<i16>> {
+        let back = self.set_feature(report_id, &value.to_le_bytes())?;
+        Ok((back.len() >= 3).then(|| i16::from_le_bytes([back[1], back[2]])))
     }
 }
 
