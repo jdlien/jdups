@@ -14,12 +14,43 @@ Battery installed  2021-11-23
 ## Why
 
 The vendor software (PowerChute Serial Shutdown) is a bundled JRE, a Jetty
-server and ~90 jars serving a web page on `https://localhost:6547`, to show
-about six numbers. The numbers are worth having. The rest is not.
+server and 90 jars serving a web page on `https://localhost:6547`, to show about
+six numbers. The numbers are worth having. The rest is not.
 
 jdups is three binaries totalling under a megabyte with one dependency, and it
-reads the same numbers straight off the device. It now does the shutdown too,
-which was the one job the vendor software genuinely earned its keep for.
+reads the same numbers straight off the device. It does the shutdown too, which
+was the one job the vendor software genuinely earned its keep for.
+
+### Measured, both installed and running on the same idle machine
+
+Against PowerChute Serial Shutdown 1.5.0.301:
+
+| | PowerChute | jdups | |
+|---|---|---|---|
+| Installed | 170.1 MB | **0.65 MB** | **262x** |
+| Files | 3,869 | **4** | **967x** |
+| Private memory | 458.4 MB | **4.4 MB** | **104x** |
+| Threads | 110 | **8** | **14x** |
+| CPU, idle | 1.30 % of a core | **0.09 %** | **15x** |
+
+Some of the shape behind those numbers:
+
+- **77.7 MB of the install is web assets** — 3,311 HTML, JS, CSS and image files.
+  That is 120x the entire jdups installation, to render six numbers in a browser.
+- It ships **`ecj`, the Eclipse Java compiler**, so it can compile JSPs at
+  runtime on your machine.
+- **Its notification-area icon alone uses 71.5 MB** and 8 threads. That is one
+  icon, doing the same job as ours, in 16x the memory of everything jdups
+  installs. It also does not follow the system light/dark theme. Ours does.
+- 1.3 % of a core, continuously, is not free either — it is roughly what jdups
+  costs *fifteen times over*, to poll the same device over the same USB cable.
+
+**Fair caveats.** Both were idle-monitoring; neither figure covers behaviour
+during an actual outage. PowerChute's number may be a floor, since opening its
+web UI would likely push it higher. And it is not a like-for-like comparison in
+its favour: it ships a web interface, SNMP, and email notification that jdups
+deliberately does not. The 77.7 MB buys something — just nothing this project
+wanted.
 
 ## What works
 
