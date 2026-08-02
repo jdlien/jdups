@@ -479,6 +479,10 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                             &opts.dir, &mut published, &mut last_publish, true,
                             Phase::Pending, Some(0), action, Event::Shutdown,
                         );
+                        // Announced. The pass-end publish must not carry the
+                        // event again: each Event::Shutdown bumps the sequence,
+                        // and the tray toasts "shutting down now" once per bump.
+                        event = Event::None;
                         let outcome = match device.as_ref() {
                             Some(dev) => shutdown::execute(dev, &opts.dir, cfg.os_shutdown_s, &|m| {
                                 say(Level::Act, m)
@@ -805,6 +809,29 @@ mod tests {
         assert!(!o.fresh);
         assert_eq!(o.charge, Some(80));
         assert!(o.on_battery, "the latch has to see the last known state");
+    }
+
+    /// One armed shutdown is one sequence bump. The inner publish before
+    /// execute and the pass-end publish used to both carry Event::Shutdown, so
+    /// the tray -- which keys "is this new" on the sequence -- toasted the same
+    /// shutdown twice.
+    #[test]
+    fn an_event_advances_the_sequence_once_and_a_refresh_not_at_all() {
+        let dir = std::env::temp_dir().join("jdups-publish-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut published = Status::default();
+        let mut last: Option<Instant> = None;
+        let action = Action::Shutdown(jdups::policy::Why::Runtime);
+
+        // The inner publish, right before execute...
+        publish(&dir, &mut published, &mut last, true, Phase::Pending, Some(0), action, Event::Shutdown);
+        assert_eq!(published.seq, 1);
+        assert_eq!(published.event, Event::Shutdown);
+        // ...and the pass-end publish, which carries no event by then.
+        publish(&dir, &mut published, &mut last, true, Phase::Pending, Some(0), action, Event::None);
+        assert_eq!(published.seq, 1, "the same shutdown was announced twice");
+        assert_eq!(published.event, Event::Shutdown, "the event must survive a refresh");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The disconnected path has to keep driving the policy. This is the
