@@ -49,6 +49,12 @@ const INPUT_RETRY_MAX: Duration = Duration::from_secs(3600);
 /// How long to wait before trying a failed shutdown transaction again. Long
 /// enough not to hammer `InitiateShutdownW`, short enough to matter on battery.
 const RETRY_SHUTDOWN_S: u64 = 30;
+/// Consecutive failed status polls before the handle is declared dead and the
+/// device reopened. A healthy device answers every poll, so this is ten
+/// seconds of nothing at the 2 s cadence -- long enough to skip a transient,
+/// well inside the 30 s staleness default, so a quick reopen keeps the
+/// readings from ever counting as stale.
+const POLL_FAILURES_TO_REOPEN: u32 = 5;
 
 pub struct Options {
     pub settings: Settings,
@@ -100,6 +106,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut backoff = RETRY_MIN;
     let mut device_ok = false;
     let mut reconciled = false;
+    let mut poll_failures: u32 = 0;
     // `None` means "due now". Never `Instant::now() - POLL_EVERY`: `Instant` on
     // Windows counts from boot, and subtracting more than the machine has been
     // up panics -- which is exactly the state a boot-started agent runs in.
@@ -179,35 +186,23 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                         say(Level::Warn, &format!("lost the UPS: {e}"));
                         device_ok = false;
                     }
-                    // Keep deciding while disconnected. The latch and the
-                    // backstop are the whole point: an outage that takes the USB
-                    // link with it must not become an agent that sits quiet.
-                    //
-                    // **And keep acting on it.** This used to call `tick` and
-                    // drop the Action on the floor, so the backstop could fire
-                    // with nothing listening -- in exactly the scenario it was
-                    // written for. There is no device to arm, but the machine
-                    // can still be shut down, which is the half that matters.
-                    let o = observe(&start, false, &status, charge, runtime_s, WakeEvent::None);
-                    let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
-                    let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
-                    if action.is_shutdown() && !dry_run && committed_at.is_none() {
-                        say(Level::Act, "the UPS is unreachable and the deadline has passed; shutting down without it");
-                        committed_at = Some(o.now_s);
-                    }
-
+                    // No read to park on, so pace the loop here -- and then
+                    // fall through. Everything below still runs while
+                    // disconnected: the latch and the backstop are the whole
+                    // point, and an outage that takes the USB link with it must
+                    // not become an agent that sits quiet. This path used to
+                    // decide on its own, announce "shutting down without it",
+                    // and then execute nothing at all.
                     sleep_interruptibly(backoff.min(POLL_EVERY), &stop);
                     backoff = (backoff * 2).min(RETRY_MAX);
-                    continue;
                 }
             }
         }
-        let dev = device.as_ref().unwrap();
 
         // --- the input stream ---------------------------------------------
         // Retried on a slow cadence: a stream that came back is worth having,
         // and reopening is the only thing that has ever restored one.
-        if !input_ok && last_input_retry.elapsed() >= input_backoff {
+        if device.is_some() && !input_ok && last_input_retry.elapsed() >= input_backoff {
             last_input_retry = Instant::now();
             input_backoff = (input_backoff * 2).min(INPUT_RETRY_MAX);
             if let Ok(d) = hid::open(opts.serial.as_deref()) {
@@ -218,6 +213,8 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 continue;
             }
         }
+        let mut polled = false;
+        if let Some(dev) = device.as_ref() {
         match if input_ok {
             dev.input(READ_TIMEOUT_MS)
         } else {
@@ -291,12 +288,22 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
 
         // --- the poll -------------------------------------------------------
-        let polled = last_poll.is_none_or(|t| t.elapsed() >= POLL_EVERY);
+        polled = last_poll.is_none_or(|t| t.elapsed() >= POLL_EVERY);
         if polled {
             last_poll = Some(Instant::now());
-            if let Ok(b) = dev.feature(report::PRESENT_STATUS) {
-                status = Some(dev.status_of(&b, false));
-                status_fresh = true;
+            match dev.feature(report::PRESENT_STATUS) {
+                Ok(b) => {
+                    poll_failures = 0;
+                    status = Some(dev.status_of(&b, false));
+                    status_fresh = true;
+                }
+                // Counted, because a handle can die while the device stays
+                // attached: this UPS re-enumerates across some resumes, the
+                // old handle then fails every read forever, and reopening is
+                // the only recovery. Without the count, `device` was never
+                // dropped after the first open and the reconnect branch above
+                // was dead code.
+                Err(_) => poll_failures += 1,
             }
             // The self-test, which matters more than it looks. A test transfers
             // to battery for a few seconds, so without this the log shows an
@@ -323,6 +330,17 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 }
                 numbers_fresh = true;
             }
+        }
+        }
+
+        // --- a dead handle is a lost device ----------------------------------
+        // A healthy device answers every status poll, so a run of failures
+        // means the handle, not the mains. Reopen through the connect branch,
+        // which warns if the device is genuinely gone.
+        if poll_failures >= POLL_FAILURES_TO_REOPEN {
+            poll_failures = 0;
+            device = None;
+            say(Level::Warn, "the UPS stopped answering reads; reopening");
         }
 
         // --- resumes, from the service control handler ------------------------
@@ -378,15 +396,15 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             // names for the rest from a table nobody here has verified would be
             // worse than a number somebody can look up.
             if on_battery_now {
-                let testing = dev
-                    .feature(report::TEST)
-                    .ok()
+                let testing = device
+                    .as_ref()
+                    .and_then(|d| d.feature(report::TEST).ok())
                     .as_deref()
                     .and_then(decode::test)
                     .is_some_and(|v| decode::test_result(v) == "in-progress");
-                let code = dev
-                    .feature(report::LAST_TRANSFER)
-                    .ok()
+                let code = device
+                    .as_ref()
+                    .and_then(|d| d.feature(report::LAST_TRANSFER).ok())
                     .as_deref()
                     .and_then(decode::last_transfer);
                 say(
@@ -461,9 +479,22 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                             &opts.dir, &mut published, &mut last_publish, true,
                             Phase::Pending, Some(0), action, Event::Shutdown,
                         );
-                        match shutdown::execute(dev, &opts.dir, cfg.os_shutdown_s, &|m| {
-                            say(Level::Act, m)
-                        }) {
+                        let outcome = match device.as_ref() {
+                            Some(dev) => shutdown::execute(dev, &opts.dir, cfg.os_shutdown_s, &|m| {
+                                say(Level::Act, m)
+                            }),
+                            // No UPS to arm, but the machine can still go down
+                            // cleanly, which is the half that matters. The UPS
+                            // keeps supplying a powered-off PC until mains
+                            // returns or the battery runs out; wasteful,
+                            // recoverable, harmless.
+                            None => shutdown::execute_os_only(&|m| say(Level::Act, m)),
+                        };
+                        match outcome {
+                            shutdown::Outcome::Committed { ups_cutoff_s: -1 } => say(
+                                Level::Act,
+                                "committed: Windows is going down; the UPS was unreachable and stays up",
+                            ),
                             shutdown::Outcome::Committed { ups_cutoff_s } => say(
                                 Level::Act,
                                 &format!("committed: Windows is going down, UPS cuts output in {ups_cutoff_s} s"),
@@ -507,11 +538,13 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         // torn down by that same sequence. A 2 s cadence could miss the only
         // event the watch exists for.
         if polled || o.on_battery {
-            let now = countdown(dev);
-            if last_countdown.is_some_and(|prev| prev != now) {
-                say(Level::Act, &describe_countdown(&now));
+            if let Some(dev) = device.as_ref() {
+                let now = countdown(dev);
+                if last_countdown.is_some_and(|prev| prev != now) {
+                    say(Level::Act, &describe_countdown(&now));
+                }
+                last_countdown = Some(now);
             }
-            last_countdown = Some(now);
         }
     }
 

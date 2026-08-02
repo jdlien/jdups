@@ -116,6 +116,29 @@ pub fn execute(dev: &Device, dir: &Path, os_seconds: u32, say: &dyn Fn(&str)) ->
     }
 }
 
+/// The OS half alone, for when the UPS is unreachable.
+///
+/// There is nothing to arm, so there is no transaction: Windows going down is
+/// the whole job, and if it is refused nothing has happened. No intent record
+/// either, because the record exists to reconcile a UPS countdown and none is
+/// being armed. The UPS keeps supplying a powered-off machine until mains
+/// returns or the battery dies, which is the wasteful-but-harmless branch of
+/// the ordering argument at the top of this file.
+///
+/// `Committed { ups_cutoff_s: -1 }` on success: -1 is the register's own idle
+/// value and cannot come out of `execute`, whose cutoff is always positive.
+pub fn execute_os_only(say: &dyn Fn(&str)) -> Outcome {
+    if let Err(e) = enable_shutdown_privilege() {
+        return Outcome::Aborted(format!("could not enable the shutdown privilege: {e}"));
+    }
+    say("shutdown privilege enabled");
+    if let Err(e) = begin_os_shutdown(OS_GRACE_S) {
+        return Outcome::Aborted(format!("Windows refused the shutdown: {e}"));
+    }
+    say(&format!("Windows accepted the shutdown, starting in {OS_GRACE_S} s"));
+    Outcome::Committed { ups_cutoff_s: -1 }
+}
+
 /// Put everything back, in the only order that is safe.
 ///
 /// **The UPS first, and Windows only if the UPS is confirmed disarmed.** This
