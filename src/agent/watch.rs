@@ -244,9 +244,22 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 // The urgent one. Taken straight off the stream rather than
                 // waiting for the next poll, because the device raising this is
                 // it announcing that it is about to cut output.
-                Some(report::PRESENT_STATUS) | Some(report::SHUTDOWN_IMMINENT) => {
+                Some(report::PRESENT_STATUS) => {
                     status = Some(dev.status_of(&buf, true));
                     status_fresh = true;
+                }
+                // Report 20 is a partial view -- ShutdownImminent and
+                // BelowRemainingCapacityLimit, nothing else -- so decoding it
+                // as a full status reads every other flag as cleared and
+                // fabricates "on battery", which latches a phantom outage.
+                // Merge the two flags it carries; with no baseline yet the 2 s
+                // poll supplies one almost immediately, and report 22 carries
+                // ShutdownImminent too.
+                Some(report::SHUTDOWN_IMMINENT) => {
+                    if let Some(s) = status.as_mut() {
+                        s.apply_shutdown_report(&dev.status_of(&buf, true));
+                        status_fresh = true;
+                    }
                 }
                 _ => {}
                 }

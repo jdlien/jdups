@@ -319,6 +319,20 @@ impl PresentStatus {
     pub fn on_battery(&self) -> bool {
         !self.ac_present || self.discharging
     }
+
+    /// Merge input report 20 into a full status.
+    ///
+    /// Report 20 carries `ShutdownImminent` and `BelowRemainingCapacityLimit`
+    /// and **nothing else**, and `HidP_GetUsages` cannot report usages the
+    /// report does not contain — so a `PresentStatus` decoded from it has every
+    /// other flag cleared. Taken as a whole status, `ac_present = false` reads
+    /// as *on battery*: a report-20 push clearing its flags — the battery
+    /// recharging past the capacity limit, on mains — fabricated an outage in
+    /// every consumer that replaced its held status with the decode.
+    pub fn apply_shutdown_report(&mut self, partial: &PresentStatus) {
+        self.shutdown_imminent = partial.shutdown_imminent;
+        self.below_remaining_capacity_limit = partial.below_remaining_capacity_limit;
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +415,26 @@ mod tests {
         assert_eq!(watts(20, 900), 180);
         assert_eq!(watts(0, 900), 0);
         assert_eq!(watts(100, 900), 900);
+    }
+
+    #[test]
+    fn a_shutdown_report_updates_only_the_flags_it_carries() {
+        // The held status: on mains, battery in.
+        let mut held = PresentStatus::from_usages(&[(PAGE_BATTERY, 0xD0), (PAGE_BATTERY, 0xD1)]);
+        // Report 20 with ShutdownImminent set. Every other flag decodes as
+        // cleared, because the report does not carry them.
+        let partial = PresentStatus::from_usages(&[(PAGE_POWER, 0x69)]);
+        held.apply_shutdown_report(&partial);
+        assert!(held.shutdown_imminent);
+        assert!(!held.below_remaining_capacity_limit);
+        assert!(held.ac_present, "a flag report 20 does not carry was overwritten");
+        assert!(held.battery_present);
+        assert!(!held.on_battery(), "a partial report fabricated an outage");
+
+        // And the flags it does carry can clear as well as set.
+        held.apply_shutdown_report(&PresentStatus::default());
+        assert!(!held.shutdown_imminent);
+        assert!(held.ac_present);
     }
 
     #[test]

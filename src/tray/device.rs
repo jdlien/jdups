@@ -267,9 +267,19 @@ fn apply_input(
                 reading.runtime_s = smoother.runtime();
             }
         }
-        Some(report::PRESENT_STATUS) | Some(report::SHUTDOWN_IMMINENT) => {
+        Some(report::PRESENT_STATUS) => {
             reading.status = dev.status_of(buf, true);
             reading.have_status = true;
+        }
+        // Report 20 is a partial view -- ShutdownImminent and
+        // BelowRemainingCapacityLimit, nothing else -- so decoding it as a full
+        // status reads every other flag as cleared and fabricates "on battery".
+        // Merge the two flags it carries; with no baseline yet, let the sweep
+        // supply the full status first.
+        Some(report::SHUTDOWN_IMMINENT) => {
+            if reading.have_status {
+                reading.status.apply_shutdown_report(&dev.status_of(buf, true));
+            }
         }
         Some(report::AC_PRESENT) => {
             // Its own report, and the flags say the same thing; take the sweep's

@@ -145,7 +145,22 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     acc.push_stream(decode::charge(&buf), decode::runtime_s(&buf));
                 }
                 Some(report::PRESENT_STATUS) | Some(report::SHUTDOWN_IMMINENT) => {
-                    let s = dev.status_of(&buf, true);
+                    let decoded = dev.status_of(&buf, true);
+                    // Report 20 is a partial view -- ShutdownImminent and
+                    // BelowRemainingCapacityLimit, nothing else -- so decoding
+                    // it as a full status reads every other flag as cleared and
+                    // fabricates "on battery": a report-20 push clearing its
+                    // flags wrote a phantom onbattery row. Merge the two flags
+                    // it carries; with no baseline yet, wait for report 22.
+                    let s = if buf.first().copied() == Some(report::SHUTDOWN_IMMINENT) {
+                        let Some(mut prev) = last_status else {
+                            continue;
+                        };
+                        prev.apply_shutdown_report(&decoded);
+                        prev
+                    } else {
+                        decoded
+                    };
                     acc.set_status(s);
                     // A transition closes the window immediately, so an outage
                     // is never averaged into invisibility by a five-minute
