@@ -276,6 +276,37 @@ Worth re-running after any big change to what is normally open:
 Get-WinEvent -FilterHashtable @{LogName='System'; Id=1074,13} -MaxEvents 200
 ```
 
+## Review findings deliberately not fixed
+
+Recorded so they read as decisions rather than oversights. Someone should feel
+free to disagree with any of them.
+
+- **A failed intent record does not abort the shutdown.** The transaction logs
+  it and continues. Refusing to protect a machine because a small file could not
+  be written is the wrong trade; the cost is that a crash in the following
+  seconds leaves a countdown reconciliation cannot attribute.
+- **The config file's ACL and ancestors are not verified.** A user who can
+  pre-create `%ProgramData%\jdups\jdups.conf` with a protected DACL *before*
+  installation could feed a SYSTEM process its thresholds. Real, but it needs
+  local access ahead of install, and verifying ownership up the whole path is a
+  meaningful chunk of code guarding a narrow window. The installer does refuse a
+  reparse point on the directory.
+- **`agent-status.txt` can be denied by pre-creation.** Same shape: create it as
+  a directory before install and every publish fails, suppressing the tray's
+  shutdown warning. The log would still record everything.
+- **`HidD_SetFeature` and the readback poll are unbounded.** A wedged driver
+  could hang the agent thread during the transaction. Bounding it means moving
+  writes to overlapped I/O, and the failure it guards against is benign in
+  practice: Windows is already going down by then, so the machine shuts down
+  cleanly and the UPS simply never gets armed.
+- **`GetOverlappedResult(..., TRUE)` after `CancelIoEx` can wait indefinitely**
+  if the driver never completes the cancellation. Documented Windows behaviour,
+  no clean fix without a second thread.
+- **Assorted low-severity logging items:** `jdups-2026-99.csv` passes the name
+  check, a file whose header write failed is never repaired, and the per-window
+  sample count could overflow after `u32::MAX` samples. None reachable in
+  practice at a five-minute cadence.
+
 ## Pinned: an alarm toggle in the tray
 
 **Confirmed possible, not speculation.** `AudibleAlarmControl` (`0084:5A`,
