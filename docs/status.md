@@ -5,7 +5,7 @@ context boundary — [implementation-plan.md](implementation-plan.md) carries th
 reasoning and the hardware map, so this is deliberately short and points there
 rather than repeating it.
 
-Last updated: 2026-08-01, 25 commits in.
+Last updated: 2026-08-02, 34 commits in, pushed to origin/main.
 
 ## Built
 
@@ -139,18 +139,49 @@ Be honest about these rather than assuming they work.
    **Take them out again afterwards.** `runtime_threshold_s = 3600` means any
    loss of mains qualifies instantly, which is inert today and would not be.
 
-**What is left, in rough order of value:**
+**What is left:**
 
-1. **The alarm toggle in the tray.** Confirmed possible; see the pinned section
-   below. Small, and the nicest remaining bit of user-facing work.
-2. **`jdups-agent.exe` as a Windows service.** The last structural gap: a
-   scheduled task cannot take `SERVICE_CONTROL_PRESHUTDOWN` or power
-   notifications, so sleep, hibernate and Fast Startup go unhandled and there is
-   no clean stand-down during an ordinary reboot. Also lets it hold off idle
-   sleep while on battery, and subsume the sampler, which already holds the
-   stream continuously.
-3. **Prove `uninstall.ps1`**, the one script never executed.
-4. Retire PowerChute entirely, once a few real outages have gone by.
+1. **Deploy tonight's work.** `.\install.ps1 -Agent` — the running agent
+   predates the review fixes. Nothing is broken; it is simply older.
+2. **Try the service**, when you can watch it: `.\install.ps1 -Agent -Service`.
+   Built and tested as far as it can be without elevation, and deliberately not
+   switched over unattended.
+3. **`shutdown_on_wake`**, off by default. Needs the service, and needs a real
+   sleep-and-plug-pull to prove.
+4. **Prove `uninstall.ps1`**, still the one script never executed.
+5. Retire PowerChute entirely, once a few real outages have gone by.
+
+## What four code reviews found
+
+Run by Codex over four areas on 2026-08-01/02. Roughly thirty findings; the
+ones acted on are below, and several were declined as unreachable or as a trade
+already made deliberately.
+
+**The transaction, the loop, the policy.** `unwind` aborted Windows *before*
+cancelling the UPS, so an arming that committed but failed to read back left a
+**running** machine with a live countdown — the exact filesystem-corrupting case
+the ordering argument exists to prevent. The disconnected path called `tick` and
+dropped the `Action`, so an outage that took the USB link with it could reach the
+backstop with nothing listening. One `fresh` bit covered both the status and the
+numbers, so a charge read marked a stale status current and an outage might never
+latch. A failed transaction latched the retry guard shut forever.
+
+**The tray.** The feature sweep stamped its timestamp whether or not anything was
+read, so an unplugged-but-open UPS kept a fresh sweep age indefinitely — which
+defeats the staleness rule outright. Crossing into or out of stale did not notify
+the UI at all.
+
+**HID.** `preparsed()` returned a raw handle freed on `Device` drop, from safe
+code. And the report-ID check in `decode::payload` is **vacuous on feature
+reads**: `IOCTL_HID_GET_FEATURE` leaves the caller-supplied first byte alone, so
+it compares our own write to itself. It earns its keep on input reports only.
+
+**Config, status, decode.** `decode::payload` length-checked against the *field*
+rather than the report, so `charge(&[0x0c, 0])` returned `Some(0)` from two bytes
+— a truncated read decoding as a plausible flat battery, which is the number the
+agent acts on. `status::parse` defaulted any field it could not read, so a
+corrupted `event` advanced the sequence while losing the event, and the tray then
+ignored the correction behind it.
 
 **Settled, kept for the record:**
 
