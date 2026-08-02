@@ -228,31 +228,78 @@ pub const FRESH_FOR_S: u64 = 20;
 /// stale `%ProgramData%` record left behind by a removed machine-wide install
 /// would otherwise shadow a live per-user agent forever.
 pub fn read() -> Option<Status> {
-    let paths: Vec<PathBuf> = crate::logfile::candidate_dirs().iter().map(|d| path_in(d)).collect();
-    freshest(&paths, std::time::Duration::from_secs(FRESH_FOR_S))
+    freshest(&candidate_paths(), std::time::Duration::from_secs(FRESH_FOR_S))
+}
+
+fn candidate_paths() -> Vec<PathBuf> {
+    crate::logfile::candidate_dirs().iter().map(|d| path_in(d)).collect()
+}
+
+/// Candidate files young enough to be the agent speaking, newest first.
+fn fresh_candidates(
+    paths: &[PathBuf],
+    max_age: std::time::Duration,
+) -> Vec<(PathBuf, std::time::SystemTime, u64)> {
+    let now = std::time::SystemTime::now();
+    let mut v: Vec<(PathBuf, std::time::SystemTime, u64)> = paths
+        .iter()
+        .filter_map(|p| {
+            let md = std::fs::metadata(p).ok()?;
+            let m = md.modified().ok()?;
+            // A clock that says the file is from the future reads as age zero:
+            // fresh, which is the direction that keeps the warning alive.
+            if now.duration_since(m).unwrap_or_default() > max_age {
+                return None;
+            }
+            Some((p.clone(), m, md.len()))
+        })
+        .collect();
+    v.sort_by_key(|c| std::cmp::Reverse(c.1));
+    v
 }
 
 fn freshest(paths: &[PathBuf], max_age: std::time::Duration) -> Option<Status> {
-    let now = std::time::SystemTime::now();
-    let mut best: Option<(std::time::SystemTime, Status)> = None;
-    for path in paths {
-        let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else {
-            continue;
-        };
-        // A clock that says the file is from the future reads as age zero:
-        // fresh, which is the direction that keeps the warning alive.
-        let age = now.duration_since(modified).unwrap_or_default();
-        if age > max_age {
-            continue;
-        }
-        if best.as_ref().is_some_and(|(t, _)| *t >= modified) {
-            continue;
-        }
-        if let Some(st) = std::fs::read_to_string(path).ok().and_then(|t| Status::parse(&t)) {
-            best = Some((modified, st));
-        }
+    fresh_candidates(paths, max_age)
+        .into_iter()
+        .find_map(|(p, _, _)| std::fs::read_to_string(&p).ok().and_then(|t| Status::parse(&t)))
+}
+
+/// A `read()` that remembers what it last parsed.
+///
+/// The tray polls once a second so the shutdown warning cannot be starved,
+/// but the agent rewrites the file every few seconds at idle -- so most polls
+/// re-read and re-parsed a byte-identical file. The reader stats first and
+/// re-parses only when the winning file's (path, mtime, length) has moved;
+/// the stat itself stays at the caller's cadence, so nothing about the 1 s
+/// delivery guarantee changes.
+#[derive(Debug, Default)]
+pub struct Reader {
+    last: Option<(PathBuf, std::time::SystemTime, u64, Status)>,
+}
+
+impl Reader {
+    pub fn new() -> Reader {
+        Reader::default()
     }
-    best.map(|(_, st)| st)
+
+    pub fn read(&mut self) -> Option<Status> {
+        self.read_in(&candidate_paths(), std::time::Duration::from_secs(FRESH_FOR_S))
+    }
+
+    fn read_in(&mut self, paths: &[PathBuf], max_age: std::time::Duration) -> Option<Status> {
+        for (path, modified, len) in fresh_candidates(paths, max_age) {
+            if let Some((p, m, l, st)) = &self.last {
+                if *p == path && *m == modified && *l == len {
+                    return Some(st.clone());
+                }
+            }
+            if let Some(st) = std::fs::read_to_string(&path).ok().and_then(|t| Status::parse(&t)) {
+                self.last = Some((path, modified, len, st.clone()));
+                return Some(st);
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +436,32 @@ end
         assert_eq!(freshest(&paths, long).map(|s| s.seq), Some(2));
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// The reader answers from its cache while the file has not moved and
+    /// notices the moment it does. That it skips the parse is by construction
+    /// -- the cache key is the stat -- so this pins the answers, not the
+    /// syscall count.
+    #[test]
+    fn the_reader_tracks_rewrites_and_repeats_itself_in_between() {
+        let dir = std::env::temp_dir().join("jdups-status-reader-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let long = std::time::Duration::from_secs(3600);
+        let paths = vec![path_in(&dir)];
+        let mut r = Reader::new();
+        assert_eq!(r.read_in(&paths, long), None);
+
+        write(&dir, &Status { seq: 1, ..sample() }).unwrap();
+        assert_eq!(r.read_in(&paths, long).map(|s| s.seq), Some(1));
+        assert_eq!(r.read_in(&paths, long).map(|s| s.seq), Some(1), "the cache forgot");
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        write(&dir, &Status { seq: 2, ..sample() }).unwrap();
+        assert_eq!(r.read_in(&paths, long).map(|s| s.seq), Some(2), "a rewrite went unnoticed");
+
+        std::fs::remove_file(path_in(&dir)).unwrap();
+        assert_eq!(r.read_in(&paths, long), None, "a removed file kept answering");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `end` ends it. Two records in one file -- an interrupted rename, a double

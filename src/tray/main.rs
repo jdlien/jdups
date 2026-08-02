@@ -116,6 +116,8 @@ struct App {
     /// all-clear. What lets a recovery that happened behind a device dropout
     /// still announce "Power restored". See `notice`.
     saw_outage: bool,
+    /// Stat-before-parse reader for the agent's status file, polled at 1 Hz.
+    agent_reader: jdups::status::Reader,
     /// Whether the agent that published the pending shutdown can actually act.
     /// The menu and the notification have to say "would" rather than "will"
     /// while it cannot, or a dry run reads as an emergency.
@@ -341,6 +343,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             last_countdown_shown: None,
             icon_added: false,
             saw_outage: false,
+            agent_reader: jdups::status::Reader::new(),
             agent_armed: false,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
@@ -604,7 +607,7 @@ unsafe fn refresh(app: *mut App) {
 unsafe fn check_agent(app: *mut App) {
     use jdups::status::{Event, Phase};
 
-    let Some(st) = jdups::status::read() else {
+    let Some(st) = (unsafe { &mut (*app).agent_reader }).read() else {
         unsafe { set_pending(app, None) };
         return;
     };
