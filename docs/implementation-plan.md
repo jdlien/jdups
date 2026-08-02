@@ -177,26 +177,36 @@ premise is not shipping a runtime to read six numbers.
 ## Layout
 
 ```
-jdups/
-├── Cargo.toml           [lib] + jdups.exe (windows subsystem)
-│                        + jdups-agent.exe (console subsystem / service, Phase 8)
+jdups/                   (as built; the plan's original sketch had txn.rs and
+├── Cargo.toml            put jdups.exe in the windows subsystem, both wrong)
+│                        [lib] + jdups.exe and jdups-agent.exe (console)
+│                        + jdups-tray.exe (windows subsystem)
 ├── src/
 │   ├── lib.rs
 │   ├── hid/
-│   │   ├── mod.rs       the Device trait + a scripted fake for tests
+│   │   ├── mod.rs       the Ups trait over the device
 │   │   ├── raw.rs       CreateFile, overlapped read, bounded feature I/O
 │   │   └── caps.rs      preparsed data, HidP_GetUsages, report discovery
 │   ├── decode.rs        pure byte -> value functions. No I/O
-│   ├── model.rs         Reading, Status, Snapshot, display formatting
+│   ├── model.rs         Reading, Snapshot, smoothing, display formatting
 │   ├── logfile.rs       CSV append, monthly roll, interval accumulator
 │   ├── policy.rs        shutdown decision, a pure function (Phase 8)
+│   ├── config.rs        the settings file, a privilege boundary
+│   ├── status.rs        what the SYSTEM agent publishes and the tray reads
+│   ├── sample.rs        the headless logger behind --sample
+│   ├── main.rs          jdups.exe, the console readout
 │   ├── tray/
 │   │   ├── main.rs      window, tray icon, menu, message loop
 │   │   ├── draw.rs      gauge + digit rendering
+│   │   ├── png.rs       the toast header icon, written at first run
 │   │   └── device.rs    the device thread; publishes Snapshot
 │   └── agent/
-│       ├── main.rs      service entry, SCM plumbing
-│       └── txn.rs       the shutdown transaction state machine
+│       ├── main.rs      entry, config, singleton
+│       ├── service.rs   SCM plumbing, hand-rolled
+│       ├── watch.rs     the loop feeding policy
+│       ├── journal.rs   what gets logged, and when
+│       ├── log.rs       the agent's prose log
+│       └── shutdown.rs  the shutdown transaction
 ├── install.ps1
 └── uninstall.ps1
 ```
@@ -242,7 +252,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_DataExchange",              # clipboard
     "Win32_System_Memory",                    # GlobalAlloc/Lock for the clipboard
     # --- Phase 8: agent ---------------------------------------------------
-    "Win32_System_Shutdown",                  # InitiateSystemShutdownExW
+    "Win32_System_Shutdown",                  # InitiateShutdownW (not the older
+                                              # Ex call; see agent/shutdown.rs)
     "Win32_System_Power",                     # power notifications
     "Win32_System_Services",
     "Win32_System_EventLog",
@@ -266,17 +277,15 @@ from Microsoft's Win32 metadata, so that class of bug is structurally gone. Give
 that decoding `PresentStatus` wrong is a Phase 8 safety issue, that is worth more
 here than it looks.
 
-### Phase 8 only: `windows-service`
+### Phase 8 only: ~~`windows-service`~~ hand-rolled after all
 
-`windows-service = "0.8"` (Mullvad), in the agent binary alone so it never
-touches the tray's size. Hand-rolling `StartServiceCtrlDispatcherW` and the
-`SERVICE_STATUS` transition machine is fiddly, and a subtly wrong status deadline
-is a silent failure in the one binary allowed to shut the machine down.
-
-Confirmed it exposes what Phase 8 actually needs: `ServiceControl::Preshutdown`,
-`ServiceControlAccept::PRESHUTDOWN`, and `set_preshutdown_timeout` via
-`SERVICE_CONFIG_PRESHUTDOWN_INFO`. Preshutdown is the reason the agent is a
-service at all, so this was worth checking before committing to it.
+~~`windows-service = "0.8"` (Mullvad), in the agent binary alone.~~
+**Superseded**: the dispatcher was hand-rolled on `windows-sys` instead
+(`agent/service.rs`, ~100 lines), keeping the one-dependency claim intact.
+PRESHUTDOWN and POWEREVENT are accepted and handled; the preshutdown timeout
+stays at the OS default of 180 s, far above the 20 s stop the agent reports.
+The crate was evaluated and would have worked; a hundred lines against a
+second dependency was the trade this project keeps making in one direction.
 
 ### The enumeration work `hidapi` was hiding
 
@@ -855,13 +864,18 @@ still wants decoding against NUT.
   column and the monthly filename.
 
 ```
-# jdups log v1  interval=300s  medians per interval; transitions close the interval
-timestamp,charge,runtime_s,load_pct,watts,input_v,battery_v,ac,n,event
-2026-07-31T15:04:22-06:00,100,2595,20,180,117,27.26,1,58,
-2026-07-31T15:09:22-06:00,100,2632,20,180,117,27.26,1,57,
-2026-07-31T15:11:07-06:00,100,2508,21,189,0,27.10,0,19,onbattery
-2026-07-31T15:16:07-06:00,,,,,,,,0,device-lost
+# jdups log v1  medians per interval
+timestamp,charge,runtime_s,load_pct,watts,input_v,battery_v,ac,n,event,flags,detail
+2026-07-31T15:04:22-06:00,100,2595,20,180,117,27.26,1,58,interval,ac,
+2026-07-31T15:09:22-06:00,100,2632,20,180,117,27.26,1,57,interval,ac,
+2026-07-31T15:11:07-06:00,100,2508,21,189,0,27.10,0,19,onbattery,discharging,transfer=8
+2026-07-31T15:16:07-06:00,,,,,,,,0,device-lost,,
 ```
+
+(As built, two columns grew past this sketch: `flags` is the pipe-separated
+notable status flags, and `detail` carries the transfer reason or self-test
+result. The header no longer stamps the interval, which is a per-run option in
+a monthly file.)
 
 Monthly files, `jdups-YYYY-MM.csv`, in `%ProgramData%\jdups\`. Watts is
 `PercentLoad × ConfigActivePower / 100` on the device's own 900 W, deliberately
@@ -998,10 +1012,12 @@ What the hardware findings forced into its shape:
 | `src/agent/watch.rs` | the device loop feeding `policy` |
 | `src/agent/log.rs` | `jdups-agent-YYYY-MM.log`, prose not CSV |
 
-It decides and it logs. **`armed = true` is refused at startup with a non-zero
-exit**, because the shutdown transaction below does not exist, and an agent that
-quietly ran dry while its config said armed would be the worst outcome available
-here: somebody believing their machine is protected when it is not.
+It decides and it logs. ~~`armed = true` is refused at startup with a non-zero
+exit~~ — **superseded once the transaction was built**: arming is accepted now,
+announced loudly at startup with the PowerChute interlock warning, and the
+refusal's original justification (an agent that quietly ran dry while its
+config said armed) is answered by the startup banner instead. The historical
+reasoning stands: while the transaction did not exist, refusing was right.
 
 What that split buys is the cheapest evidence in the project. Thresholds chosen
 on a bench are guesses. Point this at the real UPS, leave it for weeks, and the
@@ -1028,14 +1044,14 @@ Four decisions worth recording:
   first draft of `policy` had backwards, and it is easy to reintroduce in the
   loop after fixing it in the decision.
 
-A scheduled task rather than a service, for now — `install.ps1 -Agent`. Legitimate
-precisely because it cannot act: what a service buys is preshutdown notification
-and knowing when the machine suspends, and neither matters until something is
-armed.
+~~A scheduled task rather than a service, for now~~ — **the service exists**
+(`agent/service.rs`, hand-rolled on `windows-sys`; `install.ps1 -Agent
+-Service`). It takes `SERVICE_CONTROL_PRESHUTDOWN` and power notifications,
+which is what the wake path needs. The scheduled-task form remains the
+still-deployed shape; see status.md for what switching over waits on.
 
-**Not yet seen an outage.** It has run against the live UPS on mains, found the
-device, and correctly written nothing. Every path from `Warn` onward is covered
-by tests and by nothing else.
+~~Not yet seen an outage.~~ **Proven end to end on 2026-08-01**, dry run
+against a real plug-pull and then a full armed shutdown; see status.md.
 
 ### It is not where most of the risk is
 
@@ -1106,11 +1122,15 @@ better failure. Pair it with a warning period and a real shutdown reason code.
 ### Configuration is a privilege boundary
 
 A SYSTEM process reading thresholds from a user-writable file is
-shutdown-as-a-service. Config lives beside the binary in
-`%ProgramFiles%\jdups`, ACL'd SYSTEM/Administrators-write, and every value is
-range-validated on load with conservative clamps. The agent **refuses armed mode**
-if validation fails, if its singleton is already held, or if its interlock check
-fails — it does not fall back to defaults and carry on.
+shutdown-as-a-service. Config lives in **`%ProgramData%\jdups\jdups.conf`**
+(not beside the binary as first planned — Program Files is for files an
+installer writes once, and this one is meant to be edited), with the installer
+stripping ACL inheritance so only SYSTEM/Administrators can write it. The
+search order is `%ProgramData%\jdups`, then `%LOCALAPPDATA%\jdups` for a
+`-PerUser` install, then beside the binary as a dev-tree fallback — so an
+installed machine ignores a conf placed next to the exe. Every value is
+range-validated on load. The agent **refuses to start on a malformed config**
+rather than falling back to defaults, and a missing file means dry run.
 
 It publishes a read-only heartbeat the tray displays, so "is the agent alive and
 armed" is visible at a glance. Disarming PowerChute without that recreates

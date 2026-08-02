@@ -165,8 +165,11 @@ jdups.exe   (windows subsystem)
   └── main.rs     window, tray icon, menu, message loop
 ```
 
-- **Rust**, `hidapi` + `windows-sys`, no GUI toolkit. Hand-rolled Win32 tray.
-  Expect a similar footprint to jdrgb (~250 KB, single-digit ms startup).
+- **Rust**, ~~`hidapi` +~~ `windows-sys`, no GUI toolkit. Hand-rolled Win32
+  tray. *(hidapi was dropped during Phase 1 — it cannot express the bounded
+  reads and the shared-access open this device needs; see the implementation
+  plan.)* Expect a similar footprint to jdrgb (~250 KB, single-digit ms
+  startup).
 - **One binary**, unlike jdrgb. There is no pre-existing CLI to preserve here, so
   the two-subsystem problem doesn't arise. If a console readout turns out to be
   wanted for scripting or debugging, `AttachConsole(ATTACH_PARENT_PROCESS)` lets
@@ -289,6 +292,13 @@ standard HID Power Device usage already read off the unit: `RemainingCapacity`,
 `RunTimeToEmpty`, `ACPresent`, and `DelayBeforeShutdown` (`0x84:0x57`, reports 21
 and 66). The shutdown itself is `InitiateSystemShutdownExW`.
 
+> Two corrections from building it. The standard `DelayBeforeShutdown` turned
+> out to be untouched by the vendor on this unit; **report 65 (`FF86:7D`) is
+> what actually arms the cutoff** — watched register by register during a real
+> PowerChute shutdown. And the call is **`InitiateShutdownW`**, chosen because
+> the older Ex call gives no way to withhold `SHUTDOWN_INSTALL_UPDATES`. See
+> `agent/shutdown.rs`.
+
 The difficulty is operational, not protocol:
 
 1. **It cannot be the tray app.** It must run with nobody logged in — a SYSTEM
@@ -299,9 +309,11 @@ The difficulty is operational, not protocol:
    the failure is silent.
 3. **Debounce.** One glitched read must never take the machine down. Require
    several consecutive samples past the threshold *and* `ACPresent = 0`.
-4. **The restart handshake.** Write `DelayBeforeShutdown` so the UPS cuts its own
-   output once the OS is down; otherwise returning mains leaves the machine off.
-   Also depends on the BIOS "restore on AC power loss" setting.
+4. **The restart handshake.** Write ~~`DelayBeforeShutdown`~~ **report 65** so
+   the UPS cuts its own output once the OS is down; otherwise returning mains
+   leaves the machine off. Also depends on the BIOS "restore on AC power loss"
+   setting. (Settled 2026-08-01: there is no handshake beyond the countdown —
+   the UPS restores output by itself when mains returns.)
 5. **PowerChute must be disarmed first.** Two armed agents will both act.
 
 ### Testing it without dreading it
@@ -369,6 +381,10 @@ In Rust, `hidapi`'s `get_feature_report` covers the reads directly; the usage ma
 only matters if you want to rediscover report IDs on different hardware, in which
 case it is worth keeping the `HidP_GetValueCaps` walk behind a `--probe` flag,
 the way `jdrgb probe` earns its place.
+
+> Superseded: `hidapi` was dropped and the raw path built instead; `--probe`
+> exists and also walks the **button** caps, which is how report 22 was found
+> at all. A value-only walk misses it entirely.
 
 A one-liner sanity check before writing any Rust, to confirm the device is
 present and talking:

@@ -5,12 +5,13 @@ context boundary — [implementation-plan.md](implementation-plan.md) carries th
 reasoning and the hardware map, so this is deliberately short and points there
 rather than repeating it.
 
-Last updated: 2026-08-02, 34 commits in, pushed to origin/main.
+Last updated: 2026-08-02, after the full-codebase review (see
+[review-2026-08-02.md](review-2026-08-02.md)).
 
 ## Built
 
 Phases 1–8 of the plan. Three binaries over one lib, one dependency
-(`windows-sys`), 151 tests, clippy clean.
+(`windows-sys`), 185 tests, clippy clean.
 
 **It has replaced PowerChute.** A full armed shutdown ran on real hardware on
 2026-08-01: 60-second notice, forced shutdown, UPS cut output about two minutes
@@ -19,10 +20,10 @@ still installed and is set to "Do not shut down in the event of a power outage".
 
 | | |
 |---|---|
-| `jdups.exe` | `--once` `--watch` `--probe` `--list` `--log` `--sample` |
+| `jdups.exe` | `--once` `--watch` `--probe` `--list` `--log` `--read` `--set` `--sample`; `--serial` picks a unit |
 | `jdups-tray.exe` | notification icon, menu, notifications; `--balloon` to fire a test one |
-| `jdups-agent.exe` | decides, warns, and shuts the machine down. `--check` `--print-config` |
-| `install.ps1` | machine-wide, or `-PerUser` with no elevation; `-Agent` adds the agent |
+| `jdups-agent.exe` | decides, warns, and shuts the machine down. `--check` `--print-config` `--config` `--dir` |
+| `install.ps1` | machine-wide, or `-PerUser` with no elevation; `-Agent` adds the agent, `-Service` runs it as a service |
 | `uninstall.ps1` | only elevates if a machine-wide install is present |
 
 `policy.rs` decides, `config.rs` guards the thresholds, `agent/journal.rs`
@@ -103,12 +104,13 @@ Be honest about these rather than assuming they work.
   Two defects only a real run could find, both now fixed: the warning fired
   three times inside one second (`now_s` is whole seconds, the loop is faster
   than that), and the menu still read "On battery" while the icon counted down.
-- **`jdups-agent.exe` is a scheduled task, not a service.** So it cannot take
-  `SERVICE_CONTROL_PRESHUTDOWN` or power notifications, which means: sleep and
-  hibernate are unhandled, and there is no clean last gasp on an ordinary
-  reboot. Observed directly — the "final read" on the way out never fired during
-  the PowerChute shutdown, because a task has no console to receive
-  `CTRL_SHUTDOWN_EVENT` on. This is the largest remaining gap.
+- ~~`jdups-agent.exe` is a scheduled task, not a service.~~ **The service is
+  built** (`agent/service.rs`, `install.ps1 -Service`): it takes
+  `SERVICE_CONTROL_PRESHUTDOWN` and power notifications, which is what makes
+  the wake path and a clean stand-down on an ordinary reboot possible at all.
+  What remains unverified is the *deployment*: the running install predates it,
+  and switching over is "What is left" #2 below. The final-read-on-the-way-out
+  gap observed under PowerChute was a property of the task form.
 - **Report 64 (`FF86:7C`)**: whether it is written or merely reflects an armed
   countdown is still unknown. The first sample already had it set, so the order
   was never observed. The transaction does not write it and works anyway.
@@ -141,15 +143,33 @@ Be honest about these rather than assuming they work.
 
 **What is left:**
 
-1. **Deploy tonight's work.** `.\install.ps1 -Agent` — the running agent
-   predates the review fixes. Nothing is broken; it is simply older.
+1. **Deploy the review fixes.** `.\install.ps1 -Agent` — the running agent
+   predates both review rounds. Nothing is broken; it is simply older, and the
+   boot-window `Instant` panic fix in particular wants to be the running copy.
 2. **Try the service**, when you can watch it: `.\install.ps1 -Agent -Service`.
    Built and tested as far as it can be without elevation, and deliberately not
-   switched over unattended.
-3. **`shutdown_on_wake`**, off by default. Needs the service, and needs a real
-   sleep-and-plug-pull to prove.
-4. **Prove `uninstall.ps1`**, still the one script never executed.
-5. Retire PowerChute entirely, once a few real outages have gone by.
+   switched over unattended. The PS 5.1 quoting bug that would have broken this
+   install path is fixed; it still deserves a watched first run.
+3. **Re-run the plug-pull** (item 4 above) after the decision-path changes from
+   the 2026-08-02 review: the mains-return gate, the report-20 merge, and the
+   dead-handle reopen all sit on that path.
+4. **`shutdown_on_wake`**, off by default. Needs the service, and needs a real
+   sleep-and-plug-pull to prove. (Its previous implementation could never fire;
+   see the review. The rewrite is tested but has not seen hardware.)
+5. **Prove `uninstall.ps1`**, still the one script never executed.
+6. Retire PowerChute entirely, once a few real outages have gone by.
+
+## What the full review found (2026-08-02)
+
+A second, phased review of the whole codebase, installer, docs and UI —
+findings, fixes and the declined list are in
+[review-2026-08-02.md](review-2026-08-02.md). The short version: the agent
+could panic inside the boot window, a shutdown could fire against restored
+mains, `shutdown_on_wake` could never fire at all, the disconnected path
+announced shutdowns it never executed, input report 20 fabricated outages, the
+tray could starve the one warning it exists to deliver, and the `-Service`
+install under Windows PowerShell 5.1 finished with no agent in any form. All
+fixed, with tests where the code is testable.
 
 ## What four code reviews found
 
@@ -205,7 +225,9 @@ ignored the correction behind it.
   is deliberately **not** passed: a power-cut shutdown that begins installing a
   feature update would outlast any countdown sized from ordinary ones.
 
-**Until the agent is proven, PowerChute stays installed and armed.**
+~~Until the agent is proven, PowerChute stays installed and armed.~~ **Proven
+2026-08-01**; PowerChute is disarmed ("Do not shut down in the event of a power
+outage") and jdups is what protects the machine. See the top of this file.
 
 ## The device's current settings
 
@@ -224,9 +246,12 @@ while nothing is happening cannot reveal what it does at shutdown.
 | 17 | `10` | `RemainingCapacityLimit`, the UPS's own low-battery point |
 | 50, 51 | `88`, `144` | Transfer voltages |
 
-`--read` is read-only and there is deliberately no `--write`. There should not
-be one until the restart cycle has been demonstrated on a sacrificial load: a
-wrong write here arms a countdown on a live machine.
+`--read` is read-only. Writes go through `--set`, which exists for the settings
+above — the alarm, the transfer voltages — and **refuses to arm the countdown
+registers** (21, 64, 65, and 66, the second `DelayBeforeShutdown` mirror): the
+only value it accepts for those is `-1`, cancel. Arming belongs in the agent's
+transaction, where a failure half way through can be undone; a CLI flag writes
+and exits with no way to recover.
 
 ## Open question: will anyone see the warning?
 
@@ -307,25 +332,19 @@ free to disagree with any of them.
   sample count could overflow after `u32::MAX` samples. None reachable in
   practice at a five-minute cadence.
 
-## Pinned: an alarm toggle in the tray
+## ~~Pinned:~~ Built: the alarm toggle in the tray
 
-**Confirmed possible, not speculation.** `AudibleAlarmControl` (`0084:5A`,
-reports 24 and 120) takes 1 = disabled, 2 = enabled, 3 = muted, and it was
-round-tripped 1 → 2 → 1 on the real unit with readback confirmation. It needs no
-elevation: the tray already opens the device `ReadWrite` and the write succeeded
-from an ordinary shell.
-
-So a checkable menu item is a small piece of work, and a genuinely nice one --
-the vendor makes you load a web app to silence a beeping UPS at 3 a.m.
-
-Two things to get right when it is built:
+**Built and in the menu.** `AudibleAlarmControl` (`0084:5A`, reports 24 and
+120) takes 1 = disabled, 2 = enabled, 3 = muted, round-tripped on the real unit
+with readback confirmation before it was wired up. The two requirements it was
+pinned with are both honoured, and kept here as the record of why:
 
 - **Write 24, then read it back with the settle loop** and reflect what the
-  device actually holds, not what was asked for. Both 24 and 120 mirror the same
-  value, so either can confirm.
-- **The menu item is a write**, and every other item in that menu is a read that
-  copies to the clipboard. It should not be possible to change the alarm by
-  misclicking a row while reaching for the readout.
+  device actually holds, not what was asked for — done on the device thread
+  (`tray/device.rs`), with the readback landing in the snapshot the menu shows.
+- **The menu item is a write**, and every other item in that menu is a read
+  that copies to the clipboard. A disabled row and separator sit between the
+  readout rows and the toggle so a misclick on a reading cannot reach it.
 
 ## Worth not losing
 

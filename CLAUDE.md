@@ -92,7 +92,7 @@ stdout and no exit code.
 
 ```powershell
 cargo build --release
-cargo test                      # 167 tests, all offline except the ignored ones
+cargo test                      # 185 tests, all offline except the ignored ones
 cargo clippy --all-targets      # kept at zero warnings
 
 .\install.ps1 -Agent -Service   # machine-wide; -PerUser for no elevation
