@@ -37,8 +37,65 @@ which was the one job the vendor software genuinely earned its keep for.
   `armed = false` is the default and what a missing config means, so it decides
   and logs and touches nothing until you say so. Run it that way first — a
   threshold picked from your own power beats one picked on a bench.
-- **`install.ps1`** — registers them as scheduled tasks. `-PerUser` installs
-  inside your profile with no elevation at all; `-Agent` adds the agent.
+- **`install.ps1`** — registers everything. `-Agent` adds the shutdown agent,
+  `-Service` runs it as a Windows service rather than a scheduled task, and
+  `-PerUser` installs inside your profile with no elevation at all.
+
+Also in the tray: a **notification** when the power goes or returns, a **red
+countdown in the icon** while a shutdown is pending, an **audible alarm toggle**
+for the UPS itself, and **Open log**.
+
+## Quick start
+
+```powershell
+cargo build --release
+.\target\release\jdups.exe --once      # does it see the UPS?
+.\install.ps1 -Agent -Service          # tray, logger, and the agent, in dry run
+```
+
+It installs **inert**. The agent decides and logs and does nothing until you say
+otherwise, which is the right way round: run it for a while, read the log, and
+pick thresholds from your own power rather than from a default.
+
+To arm it, in `C:\ProgramData\jdups\jdups.conf`:
+
+```
+armed = true
+```
+
+...then restart the service. `jdups-agent.exe --check` prints what it resolved
+to and whether it is armed.
+
+## What it writes
+
+Everything lands in `%ProgramData%\jdups` (or `%LOCALAPPDATA%\jdups` under
+`-PerUser`):
+
+| file | what |
+|---|---|
+| `jdups-YYYY-MM.csv` | the sampler's history: medians per interval, a row per event |
+| `jdups-agent-YYYY-MM.log` | the agent's account of what it decided and why |
+| `jdups.conf` | thresholds. Commented, all defaults, edit and restart |
+| `agent-status.txt` | how the SYSTEM agent tells the tray to show a warning |
+
+The CSV is the series that answers "is the battery dying" — runtime at a known
+load, tracked over months. The prose log is the one you open after something
+happened.
+
+## The console side
+
+```
+jdups --once                 the readout
+jdups --watch [SECS]         stream decoded input reports
+jdups --probe                dump every value and button cap, and re-derive the IOCTL
+jdups --list                 every HID collection present, and which one we would pick
+jdups --read 21,64,65        read feature reports by number
+jdups --set 24 2             write one. Refuses to arm the UPS countdown
+jdups --log                  print the path of the newest log
+
+jdups-agent --check          validate the config and print what it resolves to
+jdups-agent --print-config   a commented default config file
+```
 
 ## Build
 
@@ -103,6 +160,9 @@ stale number, and a shutdown agent that is wrong eats a filesystem.
 Keep PowerChute installed and armed until you have watched jdups decide
 correctly through a real outage, then disarm it before arming jdups. Both write
 the same UPS countdown register and the last writer wins.
+
+Deliberately not here: email notifications, a web UI, and anything that needs a
+service running on a port. The tray and a text file are the interface.
 
 ## Docs
 
