@@ -17,8 +17,9 @@ The vendor software (PowerChute Serial Shutdown) is a bundled JRE, a Jetty
 server and ~90 jars serving a web page on `https://localhost:6547`, to show
 about six numbers. The numbers are worth having. The rest is not.
 
-jdups is two binaries totalling ~400 KB with one dependency, and it reads the
-same numbers straight off the device.
+jdups is three binaries totalling under a megabyte with one dependency, and it
+reads the same numbers straight off the device. It now does the shutdown too,
+which was the one job the vendor software genuinely earned its keep for.
 
 ## What works
 
@@ -31,15 +32,13 @@ same numbers straight off the device.
   `--list` to see what is attached.
 - **`jdups.exe --sample`** — a headless logger writing monthly CSV, medians per
   interval, transitions closing the window early.
-- **`jdups-agent.exe`** — the shutdown agent, **in dry run**. It watches the
-  UPS, decides whether this machine should shut down, and writes what it *would*
-  have done. It cannot act: `armed = true` is refused at startup, because the
-  shutdown transaction is not written yet. Thresholds picked on a bench are
-  guesses; weeks of decisions against your own power are not.
+- **`jdups-agent.exe`** — the shutdown agent. It watches the UPS, warns before
+  it acts, and shuts the machine down cleanly. **Dry run unless told otherwise**:
+  `armed = false` is the default and what a missing config means, so it decides
+  and logs and touches nothing until you say so. Run it that way first — a
+  threshold picked from your own power beats one picked on a bench.
 - **`install.ps1`** — registers them as scheduled tasks. `-PerUser` installs
-  inside your profile with no elevation at all; `-Agent` adds the dry run.
-
-Not yet: anything that actually shuts the machine down.
+  inside your profile with no elevation at all; `-Agent` adds the agent.
 
 ## Build
 
@@ -61,16 +60,49 @@ The most useful report turned out to be one the original investigation missed
 entirely: **report 22, `PresentStatus`**, eleven status flags in one read. It is
 invisible to a `HidP_GetValueCaps` walk because those are *button* caps.
 
+## Removing PowerChute: read this first
+
+Uninstalling it changes something the uninstaller does not mention. PowerChute
+keeps Windows' **inbox HID battery driver** off the UPS; remove it and Windows
+binds that driver, decides the machine has a system battery, and starts showing
+a battery icon.
+
+That is mostly harmless and partly not, because **the whole DC half of your
+power plan goes live the moment mains fails**. On a desktop those settings have
+never applied before and nobody has ever looked at them. The dangerous one:
+
+```powershell
+# Windows must not sleep the machine during an outage. A sleeping machine
+# cannot run the agent, and the UPS drains until it cuts output and RAM with it.
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 0
+powercfg /setactive SCHEME_CURRENT
+```
+
+Worth checking the rest of the DC column too — `powercfg /q` — though on the
+machine this was developed against the only other differences were benign:
+display off sooner (which *extends* runtime), disks spinning down after ten
+minutes, and PCIe links set to maximum power savings. **Processor state stayed
+at 100 %**, so there is no throttling to worry about.
+
+Two more consequences:
+
+- **The UPS stops serving HID input reports**, because the battery driver owns
+  them. jdups falls back to polling feature reports and loses nothing but a
+  second or two of latency on `ShutdownImminent`.
+- **Scheduled tasks default to `DisallowStartIfOnBatteries` and
+  `StopIfGoingOnBatteries`.** Once Windows sees a battery, that default would
+  stop every jdups task the instant the power failed. `install.ps1` sets both
+  off explicitly; anything else you register yourself needs the same.
+
 ## Scope
 
-A readout and a log it keeps itself, first. A graceful-shutdown agent second, as
-a **separate binary**, gated behind the readout being trusted — a readout that is
-wrong shows a stale number, and a shutdown agent that is wrong eats a filesystem.
+A readout and a log it keeps itself, first. The shutdown agent second, as a
+**separate binary** and defaulting to inert — a readout that is wrong shows a
+stale number, and a shutdown agent that is wrong eats a filesystem.
 
-Until that agent exists and has been proven end to end, **PowerChute stays
-installed and armed**: it is the one job it genuinely does, Windows has no
-built-in UPS service, and losing it unnoticed would only become apparent during
-an outage.
+Keep PowerChute installed and armed until you have watched jdups decide
+correctly through a real outage, then disarm it before arming jdups. Both write
+the same UPS countdown register and the last writer wins.
 
 ## Docs
 
