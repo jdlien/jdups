@@ -22,6 +22,11 @@ const READ_TIMEOUT_MS: u32 = 500;
 /// Cadence for the feature-only fields.
 const SWEEP_EVERY: Duration = Duration::from_secs(15);
 const RETRY_MIN: Duration = Duration::from_secs(2);
+/// How often to try to recover a failed input stream, backing off because it can
+/// fail permanently: the inbox HID battery driver owns the stream once Windows
+/// binds it, and ours never comes back.
+const INPUT_RETRY_MIN: Duration = Duration::from_secs(60);
+const INPUT_RETRY_MAX: Duration = Duration::from_secs(3600);
 const RETRY_MAX: Duration = Duration::from_secs(60);
 
 pub struct Options {
@@ -55,6 +60,10 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut last_status: Option<PresentStatus> = None;
     let mut last_test: Option<u8> = None;
     let mut device_ok = false;
+    // The input stream can fail while the device stays perfectly healthy.
+    let mut input_ok = true;
+    let mut last_input_retry = Instant::now();
+    let mut input_backoff = INPUT_RETRY_MIN;
     // Whether the log has a start marker yet, so a reader can tell a gap apart
     // from the beginning of the file.
     let mut started = false;
@@ -114,7 +123,23 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         };
 
         // --- the input stream ---------------------------------------------
-        match dev.input(READ_TIMEOUT_MS) {
+        if !input_ok && last_input_retry.elapsed() >= input_backoff {
+            last_input_retry = Instant::now();
+            input_backoff = (input_backoff * 2).min(INPUT_RETRY_MAX);
+            if let Ok(d) = hid::open(opts.serial.as_deref()) {
+                device = Some(d);
+                input_ok = true;
+                continue;
+            }
+        }
+        match if input_ok {
+            dev.input(READ_TIMEOUT_MS)
+        } else {
+            // Pace off the read timeout rather than spinning with nothing to
+            // wait on.
+            sleep_interruptibly(Duration::from_millis(READ_TIMEOUT_MS as u64), &stop);
+            Ok(None)
+        } {
             Ok(Some(buf)) => match buf.first().copied() {
                 Some(report::CHARGE_RUNTIME) => {
                     acc.push_stream(decode::charge(&buf), decode::runtime_s(&buf));
@@ -176,9 +201,22 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             },
             Ok(None) => {}
             Err(e) => {
-                eprintln!("jdups: read failed: {e}");
-                device = None;
-                continue;
+                // **A failed input stream is not a lost device**, and this is the
+                // third place that had to learn it. Dropping the handle reopened
+                // it -- which succeeds, since opening is fine -- and failed on
+                // the next read immediately, so this spun as fast as the CPU
+                // allowed. Measured at 3.2 % of a core, continuously, while the
+                // agent and the tray sat at 0.05 % each.
+                //
+                // The stream dies for good once Windows binds its own battery
+                // driver to the UPS. Everything this logs is available from
+                // feature reads, so the fallback costs a little latency on a
+                // transition and nothing else.
+                if input_ok {
+                    input_ok = false;
+                    eprintln!("jdups: input stream failed ({e}); polling instead");
+                }
+                last_input_retry = Instant::now();
             }
         }
 
