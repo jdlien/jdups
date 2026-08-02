@@ -251,6 +251,18 @@ fn apply_input(
 fn sweep(dev: &hid::raw::Device, reading: &mut Reading) {
     let f = |id: u8| dev.feature(id).ok();
 
+    // Charge and runtime, which also arrive on the input stream. Read here too
+    // because the stream is not guaranteed: this device stops pushing input
+    // reports across an S3 suspend and resume, and without a second source the
+    // tray had a status but no numbers -- which the icon then rendered as "0".
+    if let Some(b) = f(report::CHARGE_RUNTIME) {
+        if let Some(c) = decode::charge(&b) {
+            reading.charge = Some(c);
+        }
+        if let Some(r) = decode::runtime_s(&b) {
+            reading.runtime_s = Some(r);
+        }
+    }
     if let Some(b) = f(report::LOAD) {
         reading.load_pct = decode::load_pct(&b);
     }

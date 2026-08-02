@@ -96,7 +96,13 @@ impl Reading {
         if !self.status.on_battery() && self.charge.is_some_and(|c| c >= FULL_ENOUGH) {
             return None;
         }
-        Some(self.runtime_min().unwrap_or(0).min(99) as u8)
+        // **Never invent a zero.** This used to be `unwrap_or(0)`, which paints
+        // "0" whenever runtime is merely unknown — and "0" on a battery icon
+        // reads as *no runtime left*, which is the most frightening thing this
+        // program can say and was, when it happened, wrong by twenty-five
+        // minutes. An unknown number gets no digits; the bar still shows charge
+        // and the colour still shows where the power is coming from.
+        Some(self.runtime_min()?.min(99) as u8)
     }
 
     /// Multi-line, for the clipboard. Every menu data row copies this.
@@ -749,5 +755,34 @@ mod tests {
     fn having_heard_nothing_is_stale() {
         let s = Snapshot { device_ok: true, ..Snapshot::default() };
         assert!(s.is_stale());
+    }
+
+    /// The one that actually happened: on battery, status known, runtime not.
+    /// It painted "0", which reads as no runtime left, on a machine with
+    /// twenty-five minutes. Unknown must render as nothing at all.
+    #[test]
+    fn an_unknown_runtime_never_paints_a_zero() {
+        let r = Reading {
+            have_status: true,
+            status: PresentStatus { ac_present: false, discharging: true, ..Default::default() },
+            charge: Some(77),
+            runtime_s: None,
+            ..Reading::default()
+        };
+        assert_eq!(r.icon_digits(), None, "invented a runtime of zero");
+    }
+
+    /// ...but a genuine zero is still a zero. The device is entitled to say the
+    /// battery is out, and suppressing that would be the opposite mistake.
+    #[test]
+    fn a_real_zero_runtime_is_still_shown() {
+        let r = Reading {
+            have_status: true,
+            status: PresentStatus { ac_present: false, discharging: true, ..Default::default() },
+            charge: Some(1),
+            runtime_s: Some(0),
+            ..Reading::default()
+        };
+        assert_eq!(r.icon_digits(), Some(0));
     }
 }
