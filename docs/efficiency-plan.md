@@ -141,3 +141,44 @@ the batch. Decide #6 and the measure-first items on the evidence. Re-run the
 60 s profile once more after PowerChute is eventually removed, because the
 dead-stream configuration changes which code paths pace the loops — that run
 is the one #5 exists for.
+
+## Results, same day
+
+Wins #1-#5 landed (#1 and #5 became one change: the `Stop` condvar replaced
+both the watcher thread and every sliced sleep). Same methodology, same boot
+per pair, deployed via a full reinstall before the "after" runs. The tray was
+measured twice — once as a dev copy, once installed — and agreed with itself
+(15.6/15.6 ms, 557/548 other-ops).
+
+| metric, idle on mains | before | after |
+|---|---|---|
+| combined wakeups, all jdups threads | 29.3/s | **13.9/s** |
+| tray CPU | 62.5 ms/min (0.104 % core) | **15.6 ms/min (0.026 %)** |
+| tray IO other-ops | 1,455/min | **548/min** |
+| tray IO reads | 291/min | **180/min** |
+| tray private memory | 2.4 MB | **1.7 MB** |
+| agent IO other-ops | 704/min | **601/min** (the countdown cadence, as predicted) |
+| agent threads | 3 | **2** (the watcher is gone) |
+| sampler / agent CPU | ~0 | ~0 |
+
+The flat 10/s thread is gone from the wakeup profile, and the wakeup total
+fell by more than that thread alone — the tray's per-second parse was
+evidently paying scheduler costs too. The tray attribution question mostly
+answered itself: the 4x CPU drop landing together with the reader change says
+the 1 Hz read-and-parse was the bulk of it, with the sweep diet carrying the
+IOCTL reduction. ~548 other-ops/min remain (parked-read cancel path, stats,
+the slimmed sweep); nothing about that number demands the ProcMon session the
+plan reserved for it.
+
+Deferred, unchanged from the plan: #6 (input timeout 500 ms → 1 s) — at 14
+wakeups/s combined the remaining pacer is the parked reads, and halving them
+is still on the table if anyone wants the trio under 8/s; the idle status
+rewrite (measured at 12 writes/min, unchanged); and the post-PowerChute re-run,
+which is the one that will show what #5 bought.
+
+One functional catch fell out of the sweep diet rather than any counter: the
+tray only read `PresentStatus` before the stream delivered one, so once the
+input stream dies for good -- the post-PowerChute permanent state -- the icon's
+power state would have frozen at the last streamed value while the ages stayed
+fresh. The sweep reads the status every pass now. Chatter numbers should not
+cost outage visibility, and this one was headed the other way.

@@ -29,9 +29,9 @@ Against PowerChute Serial Shutdown 1.5.0.301:
 |---|---|---|---|
 | Installed | 170.1 MB | **0.65 MB** | **262x** |
 | Files | 3,869 | **4** | **967x** |
-| Private memory | 458.4 MB | **4.4 MB** | **104x** |
-| Threads | 110 | **8** | **14x** |
-| CPU, idle | 1.30 % of a core | **0.09 %** | **15x** |
+| Private memory | 458.4 MB | **3.6 MB** | **127x** |
+| Threads | 110 | **5** | **22x** |
+| CPU, idle | 1.30 % of a core | **0.03 %** | **43x** |
 
 Some of the shape behind those numbers:
 
@@ -48,9 +48,13 @@ Some of the shape behind those numbers:
   power is coming from, and whose digits are the minutes remaining. The menu
   carries the full readout and copies any row to the clipboard, toggles the
   UPS's audible alarm, opens the log, and counts a pending shutdown down in
-  red. In 2.4 MB, and it respects dark mode.
+  red. In 1.7 MB, and it respects dark mode.
 - 1.3 % of a core, continuously, is not free either — it is roughly what jdups
-  costs *fifteen times over*, to poll the same device over the same USB cable.
+  costs *forty times over*, to poll the same device over the same USB cable.
+  And CPU percent undersells the difference for an always-on background tool:
+  after an efficiency pass (docs/efficiency-plan.md) the three jdups processes
+  together wake the CPU ~14 times a second at idle, and the shutdown agent
+  spends so little time on CPU that a 60-second sample cannot measure it.
 
 **Fair caveats.** Both were idle-monitoring; neither figure covers behaviour
 during an actual outage. PowerChute's number may be a floor, since opening its
