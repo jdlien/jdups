@@ -196,6 +196,33 @@ order of effort:
 - **A borderless always-on-top window** on the active monitor. Genuinely hard to
   miss, still not blocking, and the most work by a wide margin.
 
+## How long this machine takes to shut down
+
+`os_shutdown_s` sizes the UPS countdown, so it is not a preference. Measured
+from this machine's own System event log, pairing 1074 (shutdown initiated) with
+13 (OS down), 41 samples:
+
+| | N | min | median | max |
+|---|---|---|---|---|
+| **forced / system** | 35 | 4.9 s | 25.3 s | **76.0 s** |
+| Start Menu, waits for apps | 6 | 18.2 s | 23.6 s | **866.2 s** |
+
+**The 866 s outlier is a shutdown waiting on an application**, not an update —
+the Windows Update activity near it was an unrelated Defender signature. That is
+the single strongest argument for forcing: same machine, same software, and the
+difference between comfortably inside the UPS countdown and fourteen minutes
+past it.
+
+The agent forces, so 76 s is the number that matters. `os_shutdown_s = 120`
+leaves 44 s of margin and the UPS cuts at 130. PowerChute's default happens to
+be 120 too, but this one is chosen from measurement rather than inherited.
+
+Worth re-running after any big change to what is normally open:
+
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='System'; Id=1074,13} -MaxEvents 200
+```
+
 ## Pinned: an alarm toggle in the tray
 
 **Confirmed possible, not speculation.** `AudibleAlarmControl` (`0084:5A`,

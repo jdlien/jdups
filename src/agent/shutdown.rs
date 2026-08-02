@@ -252,33 +252,50 @@ fn enable_shutdown_privilege() -> Result<(), String> {
 
 /// Ask Windows to shut down in `grace_s` seconds.
 ///
-/// `bForceAppsClosed = true`, stated rather than defaulted. False can wait
-/// indefinitely on one application's unsaved-changes prompt, and an indefinite
-/// wait here means the battery decides when the machine goes down instead. The
-/// warning period before this point is what makes that a fair trade: someone at
-/// the machine has already been told and given time.
+/// **Forced, stated rather than defaulted.** A shutdown that waits for
+/// applications can wait a very long time, and an indefinite wait here means the
+/// battery decides when the machine goes down. That is not a hypothetical: on
+/// this machine, across 41 recorded shutdowns, the forced ones ranged 4.9 s to
+/// **76 s** while the ones that waited for apps reached **866 s**. Same machine,
+/// same software. Forcing is the difference between comfortably inside the UPS
+/// countdown and fourteen minutes past it.
+///
+/// The warning period before this point is what makes that a fair trade:
+/// somebody at the machine has already been told and given time to save.
+///
+/// **`InitiateShutdownW`, not `InitiateSystemShutdownExW`,** for one reason:
+/// `SHUTDOWN_INSTALL_UPDATES` is a flag here and it is deliberately **not**
+/// passed. The older call gives no say in the matter, so a shutdown triggered by
+/// a power cut could start installing a pending feature update — and the UPS
+/// countdown, sized from ordinary shutdowns, would cut power partway through it.
+/// That is how a machine does not come back. The 76 s worst case above already
+/// includes several update-driven shutdowns, so this is about the rare large
+/// one, not the routine case.
+///
+/// It also returns a Win32 error code directly rather than a BOOL, which is why
+/// this does not use `last_os_error`.
 fn begin_os_shutdown(grace_s: u32) -> Result<(), std::io::Error> {
     use windows_sys::Win32::System::Shutdown::{
-        InitiateSystemShutdownExW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_POWER,
-        SHTDN_REASON_MINOR_ENVIRONMENT,
+        InitiateShutdownW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_POWER,
+        SHTDN_REASON_MINOR_ENVIRONMENT, SHUTDOWN_FORCE_OTHERS, SHUTDOWN_FORCE_SELF,
+        SHUTDOWN_POWEROFF,
     };
 
-    let mut msg: Vec<u16> = "The UPS is running low on battery."
+    let msg: Vec<u16> = "The UPS is running low on battery."
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let ok = unsafe {
-        InitiateSystemShutdownExW(
-            std::ptr::null(),      // this machine
-            msg.as_mut_ptr(),      // shown by Windows during the grace period
+    let rc = unsafe {
+        InitiateShutdownW(
+            std::ptr::null(), // this machine
+            msg.as_ptr(),     // shown by Windows during the grace period
             grace_s,
-            1,                     // bForceAppsClosed
-            0,                     // bRebootAfterShutdown
+            SHUTDOWN_FORCE_OTHERS | SHUTDOWN_FORCE_SELF | SHUTDOWN_POWEROFF,
             SHTDN_REASON_MAJOR_POWER | SHTDN_REASON_MINOR_ENVIRONMENT | SHTDN_REASON_FLAG_PLANNED,
         )
     };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
+    if rc != 0 {
+        return Err(std::io::Error::from_raw_os_error(rc as i32));
     }
     Ok(())
 }
