@@ -48,6 +48,8 @@ foreach ($t in @($SamplerTask, $AgentTask)) {
     $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
     if ($task -and $task.Principal.UserId -match 'SYSTEM') { $needsAdmin = $true }
 }
+# A service always needs elevation to remove.
+if (Get-Service -Name $AgentTask -ErrorAction SilentlyContinue) { $needsAdmin = $true }
 
 if ($needsAdmin -and -not $admin -and -not $NoElevate) {
     Write-Host "A machine-wide install is present; elevating (accept the UAC prompt)..."
@@ -61,6 +63,18 @@ $failed = $false
 function Fail([string]$msg) { Write-Host "  FAILED: $msg" -ForegroundColor Red; $script:failed = $true }
 
 Write-Host "jdups uninstall"
+
+# --- The agent service, if it was installed that way -------------------------
+# Before the tasks, because stopping it releases the singleton and the device.
+try {
+    $svc = Get-Service -Name $AgentTask -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -ne 'Stopped') { Stop-Service -Name $AgentTask -Force -ErrorAction SilentlyContinue }
+        # sc.exe rather than Remove-Service, which is PowerShell 6+ only.
+        & sc.exe delete $AgentTask | Out-Null
+        Write-Host "  removed the $AgentTask service"
+    }
+} catch { Fail "removing the ${AgentTask} service: $_" }
 
 # --- Tasks -------------------------------------------------------------------
 foreach ($t in @($TrayTask, $SamplerTask, $AgentTask)) {

@@ -9,9 +9,9 @@
       jdups-tray     at logon, as you, limited rights. The notification icon.
       jdups-sampler  the logger, which is why history survives a logoff.
 
-    With -Agent, a third task runs the shutdown agent in dry run. See that
-    parameter: it cannot shut anything down, and is not a replacement for
-    PowerChute.
+    With -Agent, the shutdown agent is installed too -- as a scheduled task, or
+    as a Windows service with -Service. It starts in dry run unless jdups.conf
+    says armed = true.
 
     Nothing jdups does at runtime needs administrator rights -- it only reads
     HID feature reports. Elevation is for the *install shape*, not the program:
@@ -20,9 +20,9 @@
 
     Use -PerUser to skip all of that. See that parameter for what it costs.
 
-    This installs the *readout only*. There is no shutdown agent yet, so
-    PowerChute must stay installed and armed -- losing unattended shutdown
-    without noticing is the one failure this project is trying not to cause.
+    Keep PowerChute installed and disarmed ("Do not shut down in the event of a
+    power outage") before arming jdups: both write the same UPS countdown
+    register and the last writer wins.
 
 .PARAMETER PerUser
     Install entirely inside your profile, with no elevation and no UAC prompt.
@@ -41,17 +41,31 @@
 .PARAMETER Agent
     Also register the shutdown agent, in dry run.
 
-    The agent watches the UPS, decides whether this machine should shut down,
-    and writes what it *would* have done to jdups-agent-YYYY-MM.log. It cannot
-    act: this build refuses to start with armed = true, because the shutdown
-    transaction is not written yet.
+    The agent watches the UPS, warns before it acts, and shuts the machine down
+    cleanly. It starts in **dry run** -- armed = false is the default and what a
+    missing config means -- so it decides and logs and touches nothing until
+    jdups.conf says otherwise.
 
-    The point of running it is that thresholds picked on a bench are guesses.
-    Weeks of decisions against your own power are not. Leave it running, read
-    the log after the next outage, and tune jdups.conf before anything is ever
-    allowed to act on it.
+    Run it that way first. Thresholds picked on a bench are guesses; ones picked
+    from a week of your own power are not.
 
-    PowerChute stays armed. This changes nothing about that.
+.PARAMETER Service
+    Install the agent as a Windows service rather than a scheduled task.
+    Requires -Agent, and cannot be combined with -PerUser.
+
+    This does *not* buy running with no user logged in -- the SYSTEM task
+    already did that. What it buys:
+
+      - Power notifications, the only way to be told the machine suspended or
+        resumed. Nothing runs during S3, so an agent cannot watch a UPS while
+        the machine sleeps; what it can do is find out on waking and act. See
+        shutdown_on_wake in jdups.conf.
+      - SERVICE_CONTROL_PRESHUTDOWN, which arrives early enough in a reboot to
+        stand down cleanly. A scheduled task is simply killed.
+      - A restart-on-failure policy the SCM enforces.
+
+    Installing this removes the scheduled-task form, so the two cannot fight
+    over the agent's singleton.
 
 .PARAMETER SamplerOnly
     Register only the sampler. Useful on a machine nobody logs into.
@@ -75,6 +89,7 @@ param(
     [string]$Serial     = "",
     [switch]$PerUser,
     [switch]$Agent,
+    [switch]$Service,
     [switch]$SamplerOnly,
     [switch]$TrayOnly,
     # Carried across the UAC boundary; see the elevation block.
@@ -91,6 +106,14 @@ if ($SamplerOnly -and $TrayOnly) {
 }
 if ($Agent -and $TrayOnly) {
     throw "-Agent and -TrayOnly are mutually exclusive."
+}
+if ($Service -and -not $Agent) {
+    throw "-Service applies to the agent; pass -Agent as well."
+}
+if ($Service -and $PerUser) {
+    # A service runs as SYSTEM by definition, so there is no per-user shape of
+    # it, and pretending otherwise would quietly install something else.
+    throw "-Service cannot be combined with -PerUser."
 }
 if ($Interval -lt 10 -or $Interval -gt 3600) {
     throw "-Interval must be between 10 and 3600 seconds."
@@ -128,6 +151,7 @@ if (-not $admin -and -not $PerUser) {
     if ($PSBoundParameters.ContainsKey("Interval"))   { $argList += @("-Interval", $Interval) }
     if ($Serial)      { $argList += @("-Serial", $Serial) }
     if ($Agent)       { $argList += "-Agent" }
+    if ($Service)     { $argList += "-Service" }
     if ($SamplerOnly) { $argList += "-SamplerOnly" }
     if ($TrayOnly)    { $argList += "-TrayOnly" }
 
@@ -314,9 +338,46 @@ if ($Agent) {
             Write-Host "  wrote $conf (all defaults, all commented out)"
         }
 
+        $exe = Join-Path $InstallDir "jdups-agent.exe"
         $args = "-q --dir `"$LogDir`""
         if ($Serial) { $args += " --serial $Serial" }
-        $action = New-ScheduledTaskAction -Execute (Join-Path $InstallDir "jdups-agent.exe") -Argument $args
+
+        if ($Service) {
+            # A service, not a task. What that buys is power notifications --
+            # the only way to be told the machine suspended or resumed -- and
+            # SERVICE_CONTROL_PRESHUTDOWN, which arrives early enough to stand
+            # down cleanly. It does *not* buy running with no user logged in;
+            # the SYSTEM task already did that.
+            $svc = Get-Service -Name $AgentTask -ErrorAction SilentlyContinue
+            if ($svc) {
+                if ($svc.Status -ne 'Stopped') { Stop-Service -Name $AgentTask -Force }
+                # sc.exe rather than Remove-Service, which needs PS 6+ and is
+                # not present on Windows PowerShell 5.1.
+                & sc.exe delete $AgentTask | Out-Null
+                Start-Sleep -Milliseconds 500
+            }
+            # The scheduled-task form must not linger, or two agents fight over
+            # the singleton and one of them silently loses.
+            if (Get-ScheduledTask -TaskName $AgentTask -ErrorAction SilentlyContinue) {
+                Stop-ScheduledTask -TaskName $AgentTask -ErrorAction SilentlyContinue
+                Unregister-ScheduledTask -TaskName $AgentTask -Confirm:$false
+                Write-Host "  removed the $AgentTask scheduled task (superseded by the service)"
+            }
+
+            $bin = "`"$exe`" --service $args"
+            & sc.exe create $AgentTask binPath= "$bin" start= auto DisplayName= "jdups UPS agent" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "sc.exe create returned $LASTEXITCODE" }
+            & sc.exe description $AgentTask "Watches the UPS and shuts this machine down on a sustained power failure." | Out-Null
+            # Restart twice on failure, then leave it alone rather than looping.
+            & sc.exe failure $AgentTask reset= 86400 actions= restart/60000/restart/60000/"" | Out-Null
+            # Ask for a preshutdown window long enough to finish: the default is
+            # generous, but the shutdown transaction budgets its own time.
+            & sc.exe failureflag $AgentTask 1 | Out-Null
+            Start-Service -Name $AgentTask
+            Write-Host "  registered $AgentTask (Windows service, SYSTEM, automatic)"
+            $AgentIsService = $true
+        } else {
+        $action = New-ScheduledTaskAction -Execute $exe -Argument $args
         if ($PerUser) {
             $me = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
             $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
@@ -331,7 +392,8 @@ if ($Agent) {
         Register-ScheduledTask -TaskName $AgentTask -Action $action `
             -Trigger $trigger -Principal $principal -Settings (New-Settings) -Force | Out-Null
         Start-ScheduledTask -TaskName $AgentTask
-        Write-Host "  registered $AgentTask ($desc, DRY RUN)"
+        Write-Host "  registered $AgentTask (scheduled task, $desc)"
+        }
     } catch { Fail "registering ${AgentTask}: $_" }
 }
 
@@ -366,8 +428,18 @@ Write-Host ""
 Write-Host "Verifying:"
 $expected = @()
 if (-not $TrayOnly)    { $expected += $SamplerTask }
-if ($Agent)            { $expected += $AgentTask }
+if ($Agent -and -not $Service) { $expected += $AgentTask }
 if (-not $SamplerOnly) { $expected += $TrayTask }
+
+if ($Service) {
+    $svc = Get-Service -Name $AgentTask -ErrorAction SilentlyContinue
+    if ($svc) {
+        Write-Host ("  {0,-14} {1,-9} as {2}" -f $AgentTask, $svc.Status, "SYSTEM (service)")
+        if ($svc.Status -ne 'Running') { Fail "$AgentTask did not start" }
+    } else {
+        Fail "$AgentTask service did not register"
+    }
+}
 
 foreach ($t in $expected) {
     $task = Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue
