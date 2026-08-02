@@ -176,6 +176,37 @@ is still on the table if anyone wants the trio under 8/s; the idle status
 rewrite (measured at 12 writes/min, unchanged); and the post-PowerChute re-run,
 which is the one that will show what #5 bought.
 
+## The post-PowerChute re-run, same day still
+
+PCSS was uninstalled and the machine rebooted, which is the configuration the
+plan reserved judgment for: Windows' battery driver owns the device from
+enumeration, the input streams are dead permanently (one warn line per
+process, then poll fallback -- observed exactly as the docs predicted), and
+the pacing sleeps that used to be dormant are now what drives every loop.
+
+| profile, idle on mains | combined wakeups |
+|---|---|
+| baseline, pre-fix, streams alive | 29.3/s |
+| post-fix, streams alive | 13.9/s |
+| post-fix, streams dead | **11.6/s** |
+
+In this state the pre-fix code would have been *worse* than its own baseline,
+roughly 30-35/s: the agent and the sampler would each have been slicing their
+500 ms pacing sleep into 100 ms naps, ten wakeups a second apiece, forever.
+Instead the trio got quieter, because `Stop::wait_for` parks without waking
+and the parked stream reads are simply gone -- read ops fell to ~1/min on the
+agent and sampler. The agent's other-ops sat at 712/min in the first window
+after boot because the input-stream retry enumerates on its early cadence;
+that backoff doubles to an hourly cap and decays on its own.
+
+Also proven incidentally by the same reboot: the agent started ~15 s after
+boot, inside the window where the pre-review build panicked on Instant
+underflow, and ran; and the tray kept a correct power state on sweeps alone,
+which is what the unfrozen-status fix was for. The uninstall itself, an hour
+earlier, exercised the whole recovery chain live: stream death at
+re-enumeration, dead-handle reopen within 30 s, stream recovered by the retry
+at 60 s, no operator involved.
+
 One functional catch fell out of the sweep diet rather than any counter: the
 tray only read `PresentStatus` before the stream delivered one, so once the
 input stream dies for good -- the post-PowerChute permanent state -- the icon's

@@ -13,10 +13,15 @@ Last updated: 2026-08-02, after the full-codebase review (see
 Phases 1–8 of the plan. Three binaries over one lib, one dependency
 (`windows-sys`), 185 tests, clippy clean.
 
-**It has replaced PowerChute.** A full armed shutdown ran on real hardware on
-2026-08-01: 60-second notice, forced shutdown, UPS cut output about two minutes
-later, and the machine came back by itself when mains returned. PowerChute is
-still installed and is set to "Do not shut down in the event of a power outage".
+**It has replaced PowerChute, which is now uninstalled** (2026-08-02). A full
+armed shutdown ran on real hardware on 2026-08-01: 60-second notice, forced
+shutdown, UPS cut output about two minutes later, and the machine came back by
+itself when mains returned. The uninstall played out exactly as the README's
+"read this first" section predicted: Windows bound its battery driver, its own
+battery icon appeared, the input streams died for good (one warn line per
+process, then poll fallback), and the DC sleep setting was already zeroed. The
+recovery machinery handled the re-enumeration unattended; the numbers are in
+[efficiency-plan.md](efficiency-plan.md).
 
 | | |
 |---|---|
@@ -157,7 +162,9 @@ Be honest about these rather than assuming they work.
    sleep-and-plug-pull to prove. (Its previous implementation could never fire;
    see the review. The rewrite is tested but has not seen hardware.)
 5. **Prove `uninstall.ps1`**, still the one script never executed.
-6. Retire PowerChute entirely, once a few real outages have gone by.
+6. ~~Retire PowerChute entirely.~~ Done, 2026-08-02: uninstalled, rebooted,
+   battery driver bound, jdups is the sole protection. The remaining proof is
+   simply the next few real outages.
 
 ## What the full review found (2026-08-02)
 
