@@ -344,8 +344,27 @@ impl Snapshot {
     /// Anything older than this is not worth showing as current.
     pub const STALE_AFTER_S: u64 = 30;
 
+    /// Has the device stopped answering?
+    ///
+    /// **Either source counts.** This used to require a recent *input report*,
+    /// which conflated "the stream is quiet" with "the UPS is gone" — and those
+    /// come apart in a way that is not theoretical: across an S3 suspend and
+    /// resume this device stops pushing input reports altogether while feature
+    /// reads keep working perfectly, and reopening the handle does not bring the
+    /// stream back. The tray then showed "UPS not responding (stale)" over a
+    /// device that was answering every question put to it.
+    ///
+    /// A device serving feature reads is responding. The stream is how the
+    /// urgent things arrive quickly, not what proves the UPS is there.
     pub fn is_stale(&self) -> bool {
-        !self.device_ok || self.stream_age_s.is_none_or(|a| a > Self::STALE_AFTER_S)
+        if !self.device_ok {
+            return true;
+        }
+        let freshest = match (self.stream_age_s, self.sweep_age_s) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        freshest.is_none_or(|a| a > Self::STALE_AFTER_S)
     }
 
     /// What the icon should show. Stale or lost reads as `Unknown` rather than
@@ -683,5 +702,52 @@ mod tests {
         let s = r.summary();
         assert!(s.contains("n/a"), "{s}");
         assert!(!s.contains("0 V"), "missing must not render as zero: {s}");
+    }
+
+    /// The S3 case, and the reason `is_stale` looks at both ages. Across a
+    /// suspend and resume this device stops pushing input reports entirely
+    /// while feature reads keep working, and reopening does not restore the
+    /// stream. A device answering feature reads is responding.
+    #[test]
+    fn a_dead_input_stream_is_not_a_dead_device() {
+        let s = Snapshot {
+            device_ok: true,
+            stream_age_s: Some(9_999),
+            sweep_age_s: Some(2),
+            ..Snapshot::default()
+        };
+        assert!(!s.is_stale(), "a device serving feature reads read as gone");
+    }
+
+    /// ...and the converse: sweeps stalled but the stream alive is also fine.
+    #[test]
+    fn a_stalled_sweep_alone_is_not_stale_either() {
+        let s = Snapshot {
+            device_ok: true,
+            stream_age_s: Some(1),
+            sweep_age_s: Some(9_999),
+            ..Snapshot::default()
+        };
+        assert!(!s.is_stale());
+    }
+
+    /// Both quiet is genuinely gone.
+    #[test]
+    fn both_sources_quiet_is_stale() {
+        let s = Snapshot {
+            device_ok: true,
+            stream_age_s: Some(9_999),
+            sweep_age_s: Some(9_999),
+            ..Snapshot::default()
+        };
+        assert!(s.is_stale());
+        assert_eq!(s.power(), Power::Unknown);
+    }
+
+    /// Never heard anything at all is stale, not healthy.
+    #[test]
+    fn having_heard_nothing_is_stale() {
+        let s = Snapshot { device_ok: true, ..Snapshot::default() };
+        assert!(s.is_stale());
     }
 }
