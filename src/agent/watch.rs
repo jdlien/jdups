@@ -118,6 +118,10 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut status: Option<PresentStatus> = None;
     let mut charge: Option<u8> = None;
     let mut runtime_s: Option<u16> = None;
+    // When the numbers last actually arrived. They age separately from the
+    // status: report 12 failing while report 22 keeps answering left a
+    // days-old runtime qualifying the thresholds as though it were current.
+    let mut numbers_at: Option<Instant> = None;
     let mut last_countdown: Option<(Option<i16>, Option<u8>, Option<i16>)> = None;
     // When the device last actually answered. `Observation::fresh` is per-pass
     // and says nothing about health; this is what the log should report.
@@ -382,9 +386,20 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
 
         // The status is what `fresh` means to `policy`: it gates the latch, and
         // the latch is what an outage hangs on. Numbers going stale on their own
-        // is survivable; a stale status pretending to be current is not.
-        let o = observe(&start, status_fresh, &status, charge, runtime_s, wake_event);
-        let _ = numbers_fresh;
+        // is survivable -- they are withheld below and the backstop still
+        // stands -- but a stale status pretending to be current is not.
+        if numbers_fresh {
+            numbers_at = Some(Instant::now());
+        }
+        let numbers_age_s = numbers_at.map(|t| t.elapsed().as_secs());
+        let o = observe(
+            &start,
+            status_fresh,
+            &status,
+            aged(charge, numbers_age_s, cfg.stale_after_s),
+            aged(runtime_s, numbers_age_s, cfg.stale_after_s),
+            wake_event,
+        );
         if o.fresh {
             last_answer = Instant::now();
         }
@@ -725,6 +740,17 @@ fn describe_countdown(c: &(Option<i16>, Option<u8>, Option<i16>)) -> String {
     )
 }
 
+/// A reading older than the staleness window is not evidence. `None` age means
+/// it was never read at all. The policy already treats absent readings as
+/// non-qualifying, so withholding here is what connects "the charge reports
+/// stopped arriving" to "the thresholds stop acting on the last one".
+fn aged<T>(v: Option<T>, age_s: Option<u64>, max_s: u64) -> Option<T> {
+    match age_s {
+        Some(a) if a <= max_s => v,
+        _ => None,
+    }
+}
+
 /// Assemble one observation from what is currently known.
 fn observe(
     start: &Instant,
@@ -822,6 +848,18 @@ mod tests {
         assert!(!o.fresh);
         assert_eq!(o.charge, Some(80));
         assert!(o.on_battery, "the latch has to see the last known state");
+    }
+
+    /// Charge and runtime age separately from the status. A charge report that
+    /// stopped arriving hours ago must not keep qualifying the thresholds as
+    /// though it were current.
+    #[test]
+    fn a_number_past_the_staleness_window_is_withheld() {
+        assert_eq!(aged(Some(42u8), Some(5), 30), Some(42));
+        assert_eq!(aged(Some(42u8), Some(30), 30), Some(42));
+        assert_eq!(aged(Some(42u8), Some(31), 30), None);
+        assert_eq!(aged(Some(42u8), None, 30), None, "never read is not evidence");
+        assert_eq!(aged(None::<u8>, Some(5), 30), None);
     }
 
     /// One armed shutdown is one sequence bump. The inner publish before

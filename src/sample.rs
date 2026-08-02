@@ -76,13 +76,24 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 if verbose {
                     println!("{row}");
                 }
+                acc.reset();
             }
+            // Keep the window. The samples are still evidence and the next
+            // append may succeed -- a full disk clears, an ACL gets fixed --
+            // and a SYSTEM task's stderr goes nowhere, so throwing the window
+            // away here silently lost the series the sampler exists to keep.
+            // The vectors grow while writes fail, but at stream rates that is
+            // kilobytes per hour.
             Err(e) => eprintln!("jdups: could not write the log: {e}"),
         }
-        acc.reset();
     };
 
     while !stop.load(Ordering::SeqCst) {
+        // The status seen this pass, from the stream or the sweep, so
+        // transitions are detected wherever it came from.
+        let mut seen_status: Option<PresentStatus> = None;
+        let mut swept = false;
+
         // --- connect ------------------------------------------------------
         let dev = match &device {
             Some(d) => d,
@@ -152,50 +163,14 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     // fabricates "on battery": a report-20 push clearing its
                     // flags wrote a phantom onbattery row. Merge the two flags
                     // it carries; with no baseline yet, wait for report 22.
-                    let s = if buf.first().copied() == Some(report::SHUTDOWN_IMMINENT) {
-                        let Some(mut prev) = last_status else {
-                            continue;
-                        };
-                        prev.apply_shutdown_report(&decoded);
-                        prev
-                    } else {
-                        decoded
-                    };
-                    acc.set_status(s);
-                    // A transition closes the window immediately, so an outage
-                    // is never averaged into invisibility by a five-minute
-                    // median that spans both sides of it.
-                    if let Some(prev) = last_status {
-                        let power_moved = prev.on_battery() != s.on_battery();
-                        // Any other notable flag moving is worth a row too:
-                        // an overload, comms dropping, mains out of regulation.
-                        // Logging only the mains transition threw all of that
-                        // away, which is the gap this closes.
-                        let flags_moved = prev.notable() != s.notable();
-
-                        if power_moved || flags_moved {
-                            sweep(dev, &mut acc);
-                            let e = if power_moved {
-                                // The *reason* is the interesting half of a
-                                // transfer and it is feature-only, so it is only
-                                // ever available if we go and read it.
-                                if let Some(r) = dev
-                                    .feature(report::LAST_TRANSFER)
-                                    .ok()
-                                    .as_deref()
-                                    .and_then(decode::last_transfer)
-                                {
-                                    acc.set_detail(format!("transfer={r}"));
-                                }
-                                if s.on_battery() { Event::OnBattery } else { Event::OnLine }
-                            } else {
-                                Event::Status
-                            };
-                            write(&mut acc, e, opts.verbose);
-                            window_start = Instant::now();
+                    if buf.first().copied() == Some(report::SHUTDOWN_IMMINENT) {
+                        if let Some(mut prev) = last_status {
+                            prev.apply_shutdown_report(&decoded);
+                            seen_status = Some(prev);
                         }
+                    } else {
+                        seen_status = Some(decoded);
                     }
-                    last_status = Some(s);
                 }
                 // Self-tests. Report 33 is pushed on change, so a monthly
                 // self-test result lands here without being polled for -- and
@@ -237,7 +212,10 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
 
         // --- the feature-only fields ---------------------------------------
         if last_sweep.is_none_or(|t| t.elapsed() >= sweep_every) {
-            sweep(dev, &mut acc);
+            if let Some(s) = sweep(dev, &mut acc) {
+                seen_status = Some(s);
+            }
+            swept = true;
             last_sweep = Some(Instant::now());
 
             // **Polled, not just watched.** Report 33 is pushed on change, and
@@ -250,13 +228,59 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             // answer.
             if let Some(v) = dev.feature(report::TEST).ok().as_deref().and_then(decode::test) {
                 if last_test.is_some_and(|p| p != v) {
-                    sweep(dev, &mut acc);
+                    // No second sweep: the one above already filled this
+                    // window's feature columns, and sweeping twice
+                    // double-weighted its samples in the event row's medians.
                     acc.set_detail(format!("result={}", decode::test_result(v)));
                     write(&mut acc, Event::SelfTest, opts.verbose);
                     window_start = Instant::now();
                 }
                 last_test = Some(v);
             }
+        }
+
+        // --- transitions, whichever source produced the status ---------------
+        // Detected here rather than on the stream alone. The stream dies for
+        // good once Windows binds its own battery driver, and a sampler that
+        // only saw transitions on the stream logged no onbattery or online
+        // rows at all from then on -- the exact events the log exists to hold.
+        // A transition closes the window immediately, so an outage is never
+        // averaged into invisibility by a five-minute median spanning both
+        // sides of it.
+        if let Some(s) = seen_status {
+            acc.set_status(s);
+            if let Some(prev) = last_status {
+                let power_moved = prev.on_battery() != s.on_battery();
+                // Any other notable flag moving is worth a row too: an
+                // overload, comms dropping, mains out of regulation.
+                let flags_moved = prev.notable() != s.notable();
+                if power_moved || flags_moved {
+                    // Fill the event row's feature columns, unless this pass's
+                    // sweep already did.
+                    if !swept {
+                        sweep(dev, &mut acc);
+                    }
+                    let e = if power_moved {
+                        // The *reason* is the interesting half of a transfer
+                        // and it is feature-only, so it is only ever available
+                        // if we go and read it.
+                        if let Some(r) = dev
+                            .feature(report::LAST_TRANSFER)
+                            .ok()
+                            .as_deref()
+                            .and_then(decode::last_transfer)
+                        {
+                            acc.set_detail(format!("transfer={r}"));
+                        }
+                        if s.on_battery() { Event::OnBattery } else { Event::OnLine }
+                    } else {
+                        Event::Status
+                    };
+                    write(&mut acc, e, opts.verbose);
+                    window_start = Instant::now();
+                }
+            }
+            last_status = Some(s);
         }
 
         // --- close the window ----------------------------------------------
@@ -275,7 +299,11 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     0
 }
 
-fn sweep(dev: &hid::raw::Device, acc: &mut Accumulator) {
+/// Read the feature-only fields into the window, and return the status if the
+/// device answered it. The status is read every sweep, not only when the
+/// stream is quiet: once the stream dies for good this is the only source of
+/// transitions, and the caller diffs whatever this returns.
+fn sweep(dev: &hid::raw::Device, acc: &mut Accumulator) -> Option<PresentStatus> {
     let f = |id: u8| dev.feature(id).ok();
     acc.push_sweep(
         f(report::LOAD).as_deref().and_then(decode::load_pct),
@@ -283,11 +311,11 @@ fn sweep(dev: &hid::raw::Device, acc: &mut Accumulator) {
         f(report::BATTERY_VOLTS).as_deref().and_then(decode::battery_volts),
         f(report::RATED_POWER).as_deref().and_then(decode::rated_watts),
     );
-    // If the stream has not yet produced a status, take one directly rather
-    // than logging a blank `ac` column for the first window.
-    if let Some(b) = f(report::PRESENT_STATUS) {
-        acc.set_status(dev.status_of(&b, false));
+    let s = f(report::PRESENT_STATUS).map(|b| dev.status_of(&b, false));
+    if let Some(s) = s {
+        acc.set_status(s);
     }
+    s
 }
 
 /// The self-test state at startup, so the first value seen on the stream is a
