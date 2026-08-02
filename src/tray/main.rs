@@ -84,8 +84,6 @@ struct App {
     /// state only, so dragging the taskbar to a different-DPI monitor keeps the
     /// old bitmap; the same bug would land here by inheritance.
     icon_key: Option<(draw::Gauge, u32)>,
-    /// Kept alive past the Shell_NotifyIcon call that hands it over.
-    balloon_icon: HICON,
     taskbar_created: u32,
     monitor: Option<device::Monitor>,
     last_power: Option<Power>,
@@ -114,6 +112,10 @@ struct App {
     /// cannot re-create a deleted icon, so once an add fails the only recovery
     /// is another `NIM_ADD`, retried from the agent timer.
     icon_added: bool,
+    /// Whether the user has been told "On battery" and not yet given the
+    /// all-clear. What lets a recovery that happened behind a device dropout
+    /// still announce "Power restored". See `notice`.
+    saw_outage: bool,
     /// Whether the agent that published the pending shutdown can actually act.
     /// The menu and the notification have to say "would" rather than "will"
     /// while it cannot, or a dry run reads as an emergency.
@@ -330,7 +332,6 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             nid: core::mem::zeroed(),
             icon: core::ptr::null_mut(),
             icon_key: None,
-            balloon_icon: core::ptr::null_mut(),
             taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             monitor: None,
             last_power: None,
@@ -339,6 +340,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             pending_until: None,
             last_countdown_shown: None,
             icon_added: false,
+            saw_outage: false,
             agent_armed: false,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
@@ -369,9 +371,6 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
         Shell_NotifyIconW(NIM_DELETE, &(*app).nid);
         if !(*app).icon.is_null() {
             DestroyIcon((*app).icon);
-        }
-        if !(*app).balloon_icon.is_null() {
-            DestroyIcon((*app).balloon_icon);
         }
         drop(Box::from_raw(app));
         0
@@ -577,8 +576,8 @@ unsafe fn refresh(app: *mut App) {
     unsafe { (*app).last_power = Some(power) };
     if let Some(prev) = previous {
         if prev != power {
-            let missing = unsafe { &mut (*app).reported_missing };
-            if let Some(title) = notice(prev, power, missing) {
+            let (missing, outage) = unsafe { (&mut (*app).reported_missing, &mut (*app).saw_outage) };
+            if let Some(title) = notice(prev, power, missing, outage) {
                 unsafe { balloon(app, title, &snap.status_line()) };
             }
         }
@@ -733,7 +732,12 @@ unsafe fn set_pending(app: *mut App, until: Option<u64>) {
 /// idea is only worth a notification if the user was told about it in the first
 /// place, which is what `reported_missing` tracks. Without it, a startup settle
 /// and a genuine reconnection are indistinguishable from the states alone.
-fn notice(prev: Power, now: Power, reported_missing: &mut bool) -> Option<&'static str> {
+fn notice(
+    prev: Power,
+    now: Power,
+    reported_missing: &mut bool,
+    saw_outage: &mut bool,
+) -> Option<&'static str> {
     match now {
         Power::Unknown => {
             *reported_missing = true;
@@ -741,11 +745,17 @@ fn notice(prev: Power, now: Power, reported_missing: &mut bool) -> Option<&'stat
         }
         Power::Battery | Power::Critical => {
             *reported_missing = false;
+            *saw_outage = true;
             Some("On battery")
         }
         Power::Mains => {
             let was_missing = std::mem::replace(reported_missing, false);
+            let had_outage = std::mem::replace(saw_outage, false);
             match prev {
+                // An outage the user was warned about ended while the device
+                // was unreachable: the all-clear is owed, not a note about the
+                // USB cable.
+                Power::Unknown if had_outage => Some("Power restored"),
                 // Never lost power; only ever lost track of it. Say so, and only
                 // if the loss was announced.
                 Power::Unknown => was_missing.then_some("UPS responding again"),
@@ -1193,7 +1203,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_CLOSE => {
+            // Stop and join the device thread *before* the window dies, so a
+            // late PostMessageW cannot target a destroyed -- or worse,
+            // recycled -- HWND. The join after the message loop stays as the
+            // backstop; stop() is idempotent.
+            if let Some(m) = unsafe { (*app).monitor.as_mut() } {
+                m.stop();
+            }
             unsafe { DestroyWindow(hwnd) };
+            0
+        }
+        // DPI or theme moved. The icon is keyed on (gauge, dpi) and the dark
+        // mode flush runs once at startup, so without these the change waits
+        // for the next device-driven repaint -- unbounded on steady mains.
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+            unsafe { init_dark_mode() };
+            unsafe { (*app).icon_key = None };
+            unsafe { refresh(app) };
             0
         }
         WM_DESTROY => {
@@ -1255,11 +1281,12 @@ mod tests {
     fn told(states: &[Power]) -> Vec<&'static str> {
         let mut out = Vec::new();
         let mut missing = false;
+        let mut outage = false;
         let mut last: Option<Power> = None;
         for &now in states {
             if let Some(prev) = last {
                 if prev != now {
-                    if let Some(t) = notice(prev, now, &mut missing) {
+                    if let Some(t) = notice(prev, now, &mut missing, &mut outage) {
                         out.push(t);
                     }
                 }
@@ -1318,6 +1345,17 @@ mod tests {
     fn a_dropout_during_an_outage_does_not_claim_recovery() {
         let said = told(&[Power::Mains, Power::Battery, Power::Unknown, Power::Battery]);
         assert!(!said.contains(&"Power restored"), "{said:?}");
+    }
+
+    /// ...but an outage that *ends* while the device is unreachable did have
+    /// its power restored, and whoever was told "On battery" is owed the
+    /// all-clear rather than a note about the USB cable.
+    #[test]
+    fn an_outage_that_ends_during_a_dropout_still_announces_recovery() {
+        assert_eq!(
+            told(&[Power::Mains, Power::Battery, Power::Unknown, Power::Mains]),
+            vec!["On battery", "UPS not responding", "Power restored"]
+        );
     }
 
     fn snap(reading: Reading, ok: bool, age: Option<u64>) -> Snapshot {

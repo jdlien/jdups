@@ -120,6 +120,11 @@ fn run(
     // The input stream can fail while the device stays healthy. See below.
     let mut input_ok = true;
     let mut last_input_retry = Instant::now();
+    // Scheduled sweeps in a row where nothing answered. A healthy device
+    // answers every sweep, so a run of these is a dead handle, and reopening
+    // is the only recovery -- without this, a re-enumerated UPS sat behind the
+    // input retry's 60 s cadence instead of the 1-15 s reconnect backoff.
+    let mut dead_sweeps: u32 = 0;
     let mut smoother = Smoother::new();
 
     while !stop.load(Ordering::SeqCst) {
@@ -134,6 +139,10 @@ fn run(
                     last_stream = None;
                     last_sweep = None;
                     last_status = None;
+                    dead_sweeps = 0;
+                    // A fresh handle gets a fresh chance at the stream; if it
+                    // is still owned elsewhere the first read fails quietly.
+                    input_ok = true;
                     device = Some(d);
                     device.as_ref().unwrap()
                 }
@@ -223,10 +232,18 @@ fn run(
             // stayed open kept a fresh sweep age forever and the menu went on
             // showing cached numbers as current. It also defeats the staleness
             // rule outright, which takes the freshest of the two ages.
-            if sweep(dev, &mut reading) {
+            if sweep(dev, &mut reading, &mut smoother) {
                 last_sweep = Some(Instant::now());
+                dead_sweeps = 0;
+            } else if due {
+                dead_sweeps += 1;
             }
             last_status = Some(reading.status);
+        }
+        if dead_sweeps >= 2 {
+            dead_sweeps = 0;
+            device = None;
+            continue;
         }
 
         // Staleness is a property of the ages, and the ages move on their own.
@@ -299,7 +316,7 @@ fn apply_input(
 ///
 /// The caller uses this to decide whether the sweep age advances: a sweep in
 /// which every read failed is not evidence that the UPS is still there.
-fn sweep(dev: &hid::raw::Device, reading: &mut Reading) -> bool {
+fn sweep(dev: &hid::raw::Device, reading: &mut Reading, smoother: &mut Smoother) -> bool {
     let mut answered = false;
     let mut f = |id: u8| {
         let r = dev.feature(id).ok();
@@ -311,12 +328,16 @@ fn sweep(dev: &hid::raw::Device, reading: &mut Reading) -> bool {
     // because the stream is not guaranteed: this device stops pushing input
     // reports across an S3 suspend and resume, and without a second source the
     // tray had a status but no numbers -- which the icon then rendered as "0".
+    // Through the smoother, like the stream path: writing the raw quantised
+    // sample over the smoothed one re-introduced the twitch, once per sweep.
     if let Some(b) = f(report::CHARGE_RUNTIME) {
         if let Some(c) = decode::charge(&b) {
-            reading.charge = Some(c);
+            smoother.push_charge(c);
+            reading.charge = smoother.charge();
         }
         if let Some(r) = decode::runtime_s(&b) {
-            reading.runtime_s = Some(r);
+            smoother.push_runtime(r);
+            reading.runtime_s = smoother.runtime();
         }
     }
     if let Some(b) = f(report::LOAD) {
