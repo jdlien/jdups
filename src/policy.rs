@@ -303,6 +303,26 @@ impl State {
 
         let on_battery_for = o.now_s.saturating_sub(outage_since);
 
+        let stale = self
+            .last_fresh
+            .is_none_or(|t| o.now_s.saturating_sub(t) > cfg.stale_after_s);
+
+        // --- the mains-return hysteresis is not a firing window ----------
+        // The latch outlives the outage by up to a debounce, and the thresholds
+        // and the backstop used to keep evaluating inside that tail -- against
+        // observations that said, believably, that power was back. A qualifying
+        // streak begun during the outage could then complete its debounce and
+        // shut the machine down seconds after mains returned. So: while the
+        // last believed status is mains and the device is still answering, no
+        // *new* shutdown fires; either the return sustains and the latch
+        // clears, or the outage resumes and everything below rearms. Gated on
+        // `!stale` because a mains report the device went silent on is not
+        // evidence either, and the backstop must outrank it.
+        if !stale && !o.on_battery {
+            self.qualifying_since = None;
+            return Action::Warn;
+        }
+
         // --- the backstop -----------------------------------------------
         // Runs before the staleness check on purpose. If the device went quiet
         // *during* an outage, the deadline is the only thing left, and it must
@@ -316,9 +336,6 @@ impl State {
         // the device is not permission to relax — that is precisely the case
         // where doing nothing runs the battery flat. Hold, warn, and let the
         // backstop above decide.
-        let stale = self
-            .last_fresh
-            .is_none_or(|t| o.now_s.saturating_sub(t) > cfg.stale_after_s);
         if stale {
             // **The debounce restarts.** `qualifying_since` used to survive
             // this, so one low sample, a long silence, and one more low sample
@@ -688,6 +705,71 @@ mod tests {
     #[test]
     fn an_unbounded_backstop_is_not_a_backstop() {
         assert!(Config { max_on_battery_s: u64::MAX, ..cfg() }.validate().is_err());
+    }
+
+    /// Found by review. During the mains-return hysteresis the latch is still
+    /// set, and the thresholds used to keep evaluating against fresh *mains*
+    /// observations -- so a qualifying streak begun during the outage could
+    /// complete its debounce and fire a shutdown seconds after power came back.
+    /// With `warn_before_s = 0`, which validate allows, that is a machine
+    /// shutting down on restored mains.
+    #[test]
+    fn a_threshold_cannot_fire_while_fresh_readings_say_mains() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        // A healthy outage, held long enough to leave the settle window.
+        for t in 1..=1 + c.settle_s {
+            s.observe(&battery(t, 90, 2000), &c);
+        }
+        // Deep into the outage, the charge crosses the floor...
+        let t0 = 2 + c.settle_s;
+        for t in t0..t0 + c.debounce_s / 2 {
+            assert_eq!(s.observe(&battery(t, 10, 2000), &c), Action::Warn, "at t={t}");
+        }
+        // ...and then mains returns, with the charge still low, because the
+        // charge model recovers over hours. Nothing may fire on the way out.
+        for t in t0 + c.debounce_s / 2..t0 + c.debounce_s * 3 {
+            let o = Observation { charge: Some(10), ..mains(t) };
+            let a = s.observe(&o, &c);
+            assert!(!a.is_shutdown(), "shut down at t={t} with mains freshly confirmed");
+        }
+        assert!(!s.on_battery(), "the latch never cleared");
+    }
+
+    /// The same hole, through the backstop. A machine that slept through the
+    /// end of an outage resumes with the latch set and the deadline long past;
+    /// the first observation it acts on must not be a shutdown when that same
+    /// observation freshly says mains is back.
+    #[test]
+    fn the_backstop_defers_to_a_believed_mains_return() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&battery(1, 90, 2000), &c);
+        // Way past the backstop, and the world says mains.
+        let t0 = 1 + c.max_on_battery_s * 2;
+        for t in t0..=t0 + c.debounce_s {
+            let a = s.observe(&mains(t), &c);
+            assert!(!a.is_shutdown(), "backstop fired at t={t} against fresh mains");
+        }
+        assert!(!s.on_battery());
+    }
+
+    /// ...but a mains report the device has since gone silent on does not keep
+    /// deferring it forever. Once the reading is stale the backstop is the only
+    /// protection left, and it must come back.
+    #[test]
+    fn a_stale_mains_report_does_not_disarm_the_backstop() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&battery(1, 90, 2000), &c);
+        // One fresh flicker of mains, then silence with the status held there.
+        s.observe(&mains(2), &c);
+        let quiet = |t| Observation { fresh: false, ..mains(t) };
+        let a = s.observe(&quiet(1 + c.max_on_battery_s + c.stale_after_s + 1), &c);
+        assert_eq!(a, Action::Shutdown(Why::Backstop), "the backstop never came back");
     }
 
     /// Found by review. A qualifying sample, a long stretch with no trustworthy
