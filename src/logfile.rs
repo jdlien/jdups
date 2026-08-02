@@ -177,6 +177,13 @@ impl Accumulator {
         self.status = Some(s);
     }
 
+    /// Whether the rated power is already known. It survives `reset` because
+    /// it is a property of the unit, so once it is here nobody needs to read
+    /// it off the device again.
+    pub fn has_rated(&self) -> bool {
+        self.rated_w.is_some()
+    }
+
     /// Detail for the next row written. Cleared with the window.
     pub fn set_detail(&mut self, d: impl Into<String>) {
         self.detail = d.into();

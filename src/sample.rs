@@ -305,11 +305,18 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
 /// transitions, and the caller diffs whatever this returns.
 fn sweep(dev: &hid::raw::Device, acc: &mut Accumulator) -> Option<PresentStatus> {
     let f = |id: u8| dev.feature(id).ok();
+    // Rated power is a property of the unit and survives the window reset, so
+    // it is read until it answers once and then never again.
+    let rated = if acc.has_rated() {
+        None
+    } else {
+        f(report::RATED_POWER).as_deref().and_then(decode::rated_watts)
+    };
     acc.push_sweep(
         f(report::LOAD).as_deref().and_then(decode::load_pct),
         f(report::INPUT_VOLTS).as_deref().and_then(decode::input_volts),
         f(report::BATTERY_VOLTS).as_deref().and_then(decode::battery_volts),
-        f(report::RATED_POWER).as_deref().and_then(decode::rated_watts),
+        rated,
     );
     let s = f(report::PRESENT_STATUS).map(|b| dev.status_of(&b, false));
     if let Some(s) = s {

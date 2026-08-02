@@ -28,8 +28,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 /// request is noticed promptly; long enough to be free while idle.
 const READ_TIMEOUT_MS: u32 = 500;
 /// Cadence for the fields that are not on the input stream: load, voltages,
-/// rated power, install date.
+/// the status itself.
 const SWEEP_EVERY: Duration = Duration::from_secs(5);
+/// Cadence for the fields that only change when something acts: the alarm
+/// setting and the last transfer reason. Reading them every sweep was IOCTLs
+/// spent confirming nobody had touched anything; a status change forces an
+/// early read so a transfer's reason is never a half minute stale.
+const SLOW_SWEEP_EVERY: Duration = Duration::from_secs(30);
 /// Backoff after the device goes away. Capped so a replugged UPS is picked up
 /// promptly rather than after an ever-growing wait.
 const RETRY_MIN: Duration = Duration::from_secs(1);
@@ -115,6 +120,7 @@ fn run(
     let mut device: Option<hid::raw::Device> = None;
     let mut backoff = RETRY_MIN;
     let mut last_sweep: Option<Instant> = None;
+    let mut last_slow_sweep: Option<Instant> = None;
     let mut last_stream: Option<Instant> = None;
     let mut reading = Reading::default();
     let mut last_status: Option<PresentStatus> = None;
@@ -223,13 +229,18 @@ fn run(
         let status_changed = last_status != Some(reading.status);
         let due = last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY);
         if due || status_changed {
+            let slow = status_changed
+                || last_slow_sweep.is_none_or(|t| t.elapsed() >= SLOW_SWEEP_EVERY);
             // **Only count a sweep that actually read something.** This used to
             // stamp the time regardless, so a UPS unplugged while its handle
             // stayed open kept a fresh sweep age forever and the menu went on
             // showing cached numbers as current. It also defeats the staleness
             // rule outright, which takes the freshest of the two ages.
-            if sweep(dev, &mut reading, &mut smoother) {
+            if sweep(dev, &mut reading, &mut smoother, slow) {
                 last_sweep = Some(Instant::now());
+                if slow {
+                    last_slow_sweep = Some(Instant::now());
+                }
                 dead_sweeps = 0;
             } else if due {
                 dead_sweeps += 1;
@@ -312,7 +323,7 @@ fn apply_input(
 ///
 /// The caller uses this to decide whether the sweep age advances: a sweep in
 /// which every read failed is not evidence that the UPS is still there.
-fn sweep(dev: &hid::raw::Device, reading: &mut Reading, smoother: &mut Smoother) -> bool {
+fn sweep(dev: &hid::raw::Device, reading: &mut Reading, smoother: &mut Smoother, slow: bool) -> bool {
     let mut answered = false;
     let mut f = |id: u8| {
         let r = dev.feature(id).ok();
@@ -339,8 +350,11 @@ fn sweep(dev: &hid::raw::Device, reading: &mut Reading, smoother: &mut Smoother)
     if let Some(b) = f(report::LOAD) {
         reading.load_pct = decode::load_pct(&b);
     }
-    if let Some(b) = f(report::RATED_POWER) {
-        reading.rated_watts = decode::rated_watts(&b);
+    // A property of the unit, not of the moment. Once per connect.
+    if reading.rated_watts.is_none() {
+        if let Some(b) = f(report::RATED_POWER) {
+            reading.rated_watts = decode::rated_watts(&b);
+        }
     }
     if let Some(b) = f(report::INPUT_VOLTS) {
         reading.input_volts = decode::input_volts(&b);
@@ -353,19 +367,29 @@ fn sweep(dev: &hid::raw::Device, reading: &mut Reading, smoother: &mut Smoother)
             reading.battery_installed = decode::manufacture_date(&b);
         }
     }
-    if let Some(b) = f(report::ALARM) {
-        reading.alarm = b.get(1).copied();
-    }
-    if let Some(b) = f(report::LAST_TRANSFER) {
-        reading.last_transfer = decode::last_transfer(&b);
-    }
-    // Belt and braces: if the stream has not yet produced a PresentStatus, read
-    // it directly rather than showing "unknown" for the first few seconds.
-    if !reading.have_status {
-        if let Some(b) = f(report::PRESENT_STATUS) {
-            reading.status = dev.status_of(&b, false);
-            reading.have_status = true;
+    // The set-and-forget fields: the alarm changes when somebody toggles it
+    // (and the toggle path writes its own readback into the snapshot), the
+    // transfer reason when the power moves (which forces `slow`).
+    if slow || reading.alarm.is_none() {
+        if let Some(b) = f(report::ALARM) {
+            reading.alarm = b.get(1).copied();
         }
+    }
+    if slow || reading.last_transfer.is_none() {
+        if let Some(b) = f(report::LAST_TRANSFER) {
+            reading.last_transfer = decode::last_transfer(&b);
+        }
+    }
+    // The status, every sweep -- not just before the stream first delivers
+    // one. Gating this on `have_status` froze the power state outright the
+    // day the input stream died for good, which is the documented permanent
+    // condition once Windows binds its own battery driver to the UPS: the
+    // sweeps kept the ages fresh while the icon showed the last streamed
+    // state forever. Report 22 carries all eleven flags, so overwriting the
+    // whole struct is safe here, unlike report 20 on the stream.
+    if let Some(b) = f(report::PRESENT_STATUS) {
+        reading.status = dev.status_of(&b, false);
+        reading.have_status = true;
     }
     answered
 }
