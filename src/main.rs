@@ -194,9 +194,9 @@ fn cmd_sample(
     );
 
     // Ctrl-C writes a final row rather than dropping the window on the floor.
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = std::sync::Arc::new(jdups::stop::Stop::new());
     let flag = std::sync::Arc::clone(&stop);
-    let _ = ctrl_c_handler(move || flag.store(true, std::sync::atomic::Ordering::SeqCst));
+    let _ = ctrl_c_handler(move || flag.stop());
 
     sample::run(opts, stop)
 }

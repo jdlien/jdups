@@ -15,7 +15,7 @@
 //!   how talkative the device happens to be, and the staleness rule in
 //!   `policy` is load-bearing during an outage.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,7 @@ use jdups::hid::{self, Ups};
 use jdups::logfile;
 use jdups::policy::{Observation, State, WakeEvent};
 use jdups::status::{self, Event, Phase, Status};
+use jdups::stop::Stop;
 
 use crate::journal::{Journal, Level, Tick};
 use crate::shutdown;
@@ -67,7 +68,7 @@ pub struct Options {
     pub wake: Option<Arc<crate::service::Wake>>,
 }
 
-pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
+pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
     let cfg = opts.settings.policy;
     let dry_run = !opts.settings.armed;
 
@@ -146,7 +147,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     // The last self-test result seen, so only a change is worth a line.
     let mut last_test: Option<u8> = None;
 
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.is_stopped() {
         // **Per field, not one bit for all of them.** A single `fresh` flag let
         // a successful charge read mark a *stale status* current, and a status
         // read mark stale numbers current. The first is the dangerous one: the
@@ -197,7 +198,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     // not become an agent that sits quiet. This path used to
                     // decide on its own, announce "shutting down without it",
                     // and then execute nothing at all.
-                    sleep_interruptibly(backoff.min(POLL_EVERY), &stop);
+                    stop.wait_for(backoff.min(POLL_EVERY));
                     backoff = (backoff * 2).min(RETRY_MAX);
                 }
             }
@@ -224,7 +225,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         } else {
             // Nothing to wait on, so pace the loop off the poll instead of
             // spinning through it as fast as the CPU allows.
-            sleep_interruptibly(Duration::from_millis(READ_TIMEOUT_MS as u64), &stop);
+            stop.wait_for(Duration::from_millis(READ_TIMEOUT_MS as u64));
             Ok(None)
         } {
             Ok(Some(buf)) => {
@@ -797,13 +798,6 @@ fn tick(
         say(level, &msg);
     }
     action
-}
-
-fn sleep_interruptibly(d: Duration, stop: &AtomicBool) {
-    let until = Instant::now() + d;
-    while Instant::now() < until && !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
 }
 
 #[cfg(test)]

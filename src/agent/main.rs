@@ -22,8 +22,9 @@ mod service;
 mod shutdown;
 mod watch;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use jdups::stop::Stop;
 
 const USAGE: &str = "\
 jdups-agent - decides whether this machine should shut down
@@ -202,9 +203,9 @@ fn main() {
         wake: None,
     };
 
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Stop::new());
     let flag = Arc::clone(&stop);
-    let _ = ctrl_c_handler(move || flag.store(true, Ordering::SeqCst));
+    let _ = ctrl_c_handler(move || flag.stop());
 
     std::process::exit(watch::run(opts, stop));
 }

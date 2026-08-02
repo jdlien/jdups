@@ -10,3 +10,4 @@ pub mod logfile;
 pub mod model;
 pub mod policy;
 pub mod status;
+pub mod stop;

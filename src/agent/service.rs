@@ -25,6 +25,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use jdups::stop::Stop;
+
 use windows_sys::Win32::Foundation::ERROR_SERVICE_SPECIFIC_ERROR;
 use windows_sys::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SetServiceStatus, StartServiceCtrlDispatcherW, SERVICE_ACCEPT_POWEREVENT,
@@ -96,9 +98,9 @@ impl Wake {
 // hang state, so these are process-global. The agent is a singleton by
 // construction -- see the mutex in main -- so there is exactly one of each.
 static STATUS_HANDLE: AtomicUsize = AtomicUsize::new(0);
-static STOP: AtomicBool = AtomicBool::new(false);
 static CHECKPOINT: AtomicU32 = AtomicU32::new(0);
 static WAKE: std::sync::OnceLock<Arc<Wake>> = std::sync::OnceLock::new();
+static STOP: std::sync::OnceLock<Arc<Stop>> = std::sync::OnceLock::new();
 
 /// Hand this process to the SCM. Blocks until the service stops.
 ///
@@ -126,7 +128,7 @@ pub fn dispatch() -> Result<(), std::io::Error> {
 ///
 /// Set before `dispatch`, because the SCM calls back on its own thread and
 /// there is no way to pass anything in.
-type Body = fn(Arc<AtomicBool>, Arc<Wake>) -> i32;
+type Body = fn(Arc<Stop>, Arc<Wake>) -> i32;
 static BODY: std::sync::OnceLock<Body> = std::sync::OnceLock::new();
 
 pub fn set_body(f: Body) {
@@ -144,29 +146,24 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
     STATUS_HANDLE.store(handle as usize, Ordering::SeqCst);
 
     report(SERVICE_START_PENDING, 0);
+    // Both shared with the control handler through process-globals, and set
+    // *before* RUNNING is reported so no control can arrive first. This used
+    // to be bridged by a dedicated thread polling an AtomicBool every 100 ms
+    // for the life of the service -- ten scheduler wakeups a second, forever,
+    // and it was the single largest wakeup source the efficiency baseline
+    // found. The handler now signals the loop's own Stop directly.
     let wake = Arc::new(Wake::default());
     let _ = WAKE.set(Arc::clone(&wake));
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Stop::new());
+    let _ = STOP.set(Arc::clone(&stop));
 
     report(SERVICE_RUNNING, 0);
-
-    // Poll the handler's flag into the loop's own stop flag. The handler cannot
-    // touch the Arc directly without a lifetime it has no way to hold.
-    let flag = Arc::clone(&stop);
-    let watcher = std::thread::spawn(move || {
-        while !STOP.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        flag.store(true, Ordering::SeqCst);
-    });
 
     let code = match BODY.get() {
         Some(f) => f(stop, wake),
         None => ERROR_SERVICE_SPECIFIC_ERROR as i32,
     };
 
-    STOP.store(true, Ordering::SeqCst);
-    let _ = watcher.join();
     report_exit(code);
 }
 
@@ -182,7 +179,9 @@ unsafe extern "system" fn control_handler(
         // exactly like a stop.
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_PRESHUTDOWN | SERVICE_CONTROL_SHUTDOWN => {
             report(SERVICE_STOP_PENDING, 20_000);
-            STOP.store(true, Ordering::SeqCst);
+            if let Some(s) = STOP.get() {
+                s.stop();
+            }
         }
         SERVICE_CONTROL_POWEREVENT => {
             if let Some(w) = WAKE.get() {

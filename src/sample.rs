@@ -9,13 +9,13 @@
 //! that answers whether the battery is dying, and it is worthless with holes
 //! wherever the machine sat at a lock screen.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jdups::decode::{self, report, PresentStatus};
 use jdups::hid::{self, Ups};
 use jdups::logfile::{self, Accumulator, Event};
+use jdups::stop::Stop;
 
 /// How long the parked read waits before looping.
 const READ_TIMEOUT_MS: u32 = 500;
@@ -37,7 +37,7 @@ pub struct Options {
     pub verbose: bool,
 }
 
-pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
+pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
     let mut device: Option<hid::raw::Device> = None;
     let mut acc = Accumulator::new();
     let mut backoff = RETRY_MIN;
@@ -88,7 +88,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
     };
 
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.is_stopped() {
         // The status seen this pass, from the stream or the sweep, so
         // transitions are detected wherever it came from.
         let mut seen_status: Option<PresentStatus> = None;
@@ -126,7 +126,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                         window_start = Instant::now();
                         device_ok = false;
                     }
-                    sleep_interruptibly(backoff, &stop);
+                    stop.wait_for(backoff);
                     backoff = (backoff * 2).min(RETRY_MAX);
                     continue;
                 }
@@ -148,7 +148,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         } else {
             // Pace off the read timeout rather than spinning with nothing to
             // wait on.
-            sleep_interruptibly(Duration::from_millis(READ_TIMEOUT_MS as u64), &stop);
+            stop.wait_for(Duration::from_millis(READ_TIMEOUT_MS as u64));
             Ok(None)
         } {
             Ok(Some(buf)) => match buf.first().copied() {
@@ -324,9 +324,3 @@ fn initial_test(dev: &hid::raw::Device) -> Option<u8> {
     dev.feature(report::TEST).ok().as_deref().and_then(decode::test)
 }
 
-fn sleep_interruptibly(d: Duration, stop: &AtomicBool) {
-    let until = Instant::now() + d;
-    while Instant::now() < until && !stop.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}

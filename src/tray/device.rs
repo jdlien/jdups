@@ -11,7 +11,7 @@
 //! discarded during teardown; letting the UI read shared state instead has no
 //! ownership question to get wrong.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use jdups::decode::{self, report, PresentStatus};
 use jdups::hid::{self, Ups};
 use jdups::model::{Reading, Smoother, Snapshot};
+use jdups::stop::Stop;
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
@@ -38,7 +39,7 @@ const INPUT_RETRY_EVERY: Duration = Duration::from_secs(60);
 
 pub struct Monitor {
     snapshot: Arc<Mutex<Snapshot>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     /// A requested `AudibleAlarmControl` value, or 0 for "nothing asked".
     ///
     /// The UI must not touch HID -- see the module note -- so the alarm toggle
@@ -52,7 +53,7 @@ pub struct Monitor {
 impl Monitor {
     pub fn start(hwnd: HWND, msg: u32, serial: Option<String>) -> Monitor {
         let snapshot = Arc::new(Mutex::new(Snapshot::default()));
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(Stop::new());
 
         // HWND is not Send, but the numeric handle is and the window outlives
         // the thread: teardown stops and joins before destroying the window.
@@ -90,7 +91,7 @@ impl Monitor {
     /// Stop and **join**. A flag alone only lets the thread notice eventually;
     /// without the join a late `PostMessageW` can target a destroyed window.
     pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.stop.stop();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -108,7 +109,7 @@ fn run(
     msg: u32,
     serial: Option<String>,
     snapshot: Arc<Mutex<Snapshot>>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Stop>,
     alarm_request: Arc<AtomicU8>,
 ) {
     let mut device: Option<hid::raw::Device> = None;
@@ -127,7 +128,7 @@ fn run(
     let mut dead_sweeps: u32 = 0;
     let mut smoother = Smoother::new();
 
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.is_stopped() {
         // --- reconnect ----------------------------------------------------
         let dev = match &device {
             Some(d) => d,
@@ -148,12 +149,7 @@ fn run(
                 }
                 Err(e) => {
                     publish(&snapshot, target, msg, &reading, false, Some(e.to_string()), None, None);
-                    // Sleep in slices so a stop request is not stuck behind the
-                    // full backoff.
-                    let until = Instant::now() + backoff;
-                    while Instant::now() < until && !stop.load(Ordering::SeqCst) {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
+                    stop.wait_for(backoff);
                     backoff = (backoff * 2).min(RETRY_MAX);
                     continue;
                 }
@@ -173,8 +169,8 @@ fn run(
             dev.input(READ_TIMEOUT_MS)
         } else {
             // Pace off the read timeout rather than spinning with nothing to
-            // wait on.
-            std::thread::sleep(Duration::from_millis(READ_TIMEOUT_MS as u64));
+            // wait on. Against the stop, so teardown is not stuck behind it.
+            stop.wait_for(Duration::from_millis(READ_TIMEOUT_MS as u64));
             Ok(None)
         } {
             Ok(Some(buf)) => {
