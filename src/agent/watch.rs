@@ -101,6 +101,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut committed_at: Option<u64> = None;
     let mut published = Status::default();
     let mut last_publish = Instant::now() - Duration::from_secs(60);
+    let mut holding_awake = false;
 
     while !stop.load(Ordering::SeqCst) {
         let mut fresh = false;
@@ -210,6 +211,23 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
         let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
 
+        // --- do not let it sleep through an outage --------------------------
+        // Driven off the latched outage state rather than the raw reading, so a
+        // device that goes quiet mid-outage does not let the machine doze off.
+        let on_battery_now = state.on_battery();
+        if on_battery_now != holding_awake {
+            holding_awake = on_battery_now;
+            hold_awake(on_battery_now);
+            say(
+                Level::Info,
+                if on_battery_now {
+                    "holding the machine awake while on battery"
+                } else {
+                    "released the sleep hold"
+                },
+            );
+        }
+
         // --- the grace period ------------------------------------------------
         // The decision is announced before it is acted on, so whoever is at the
         // machine gets a chance to save their work. It lives here rather than in
@@ -313,6 +331,9 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     if let Some(d) = device.as_ref() {
         say(Level::Info, &format!("final read, {}", describe_countdown(&countdown(d))));
     }
+    if holding_awake {
+        hold_awake(false);
+    }
     say(Level::Info, "stopped");
     0
 }
@@ -347,6 +368,39 @@ fn countdown(dev: &hid::raw::Device) -> (Option<i16>, Option<u8>, Option<i16>) {
         u8_at(report::APC_SHUTDOWN_ARMED),
         i16_at(report::APC_SHUTDOWN_COUNTDOWN),
     )
+}
+
+/// Keep the machine awake while it is running on battery.
+///
+/// **This does not need a service, and it is not monitoring during sleep.**
+/// Nothing monitors during sleep: in S3 the CPU is off and no code of any kind
+/// runs. What can be done is refusing to enter it, which is a per-thread call
+/// any process can make.
+///
+/// The scenario it closes: the machine idles into sleep, mains fails, and
+/// nothing is left running to notice. The UPS drains over hours, cuts output,
+/// and everything in RAM goes with it. Disks are quiesced in S3 so the
+/// filesystem survives, but unsaved work does not, and the machine cold-boots
+/// rather than resuming.
+///
+/// It cannot help if the machine is **already** asleep when the power fails.
+/// There is no software answer to that one; it needs the UPS armed as a USB
+/// wake source, or sleep disabled outright.
+///
+/// `ES_CONTINUOUS` makes the state stick until it is cleared rather than
+/// counting as a single nudge, so this is called on transition rather than on
+/// every pass.
+fn hold_awake(on: bool) {
+    use windows_sys::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+    };
+    unsafe {
+        if on {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+        } else {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+    }
 }
 
 fn phase_of(action: jdups::policy::Action, o: &Observation) -> Phase {
