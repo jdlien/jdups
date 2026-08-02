@@ -36,8 +36,16 @@ const READ_TIMEOUT_MS: u32 = 500;
 const POLL_EVERY: Duration = Duration::from_secs(2);
 const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
-/// How often to try to get a failed input stream back.
-const INPUT_RETRY_EVERY: Duration = Duration::from_secs(60);
+/// How often to try to get a failed input stream back, and how far that backs
+/// off when it keeps failing.
+///
+/// It can fail *permanently*: once Windows binds its inbox HID battery driver
+/// to the UPS -- which is what happens when PowerChute is uninstalled -- that
+/// driver owns the input reports and ours never come back. Retrying every
+/// minute forever then writes two log lines a minute about a condition that is
+/// never going to change, which buries the lines that matter.
+const INPUT_RETRY_MIN: Duration = Duration::from_secs(60);
+const INPUT_RETRY_MAX: Duration = Duration::from_secs(3600);
 /// How long to wait before trying a failed shutdown transaction again. Long
 /// enough not to hammer `InitiateShutdownW`, short enough to matter on battery.
 const RETRY_SHUTDOWN_S: u64 = 30;
@@ -114,10 +122,13 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     // device; see the error arm below.
     let mut input_ok = true;
     let mut last_input_retry = Instant::now();
+    let mut input_backoff = INPUT_RETRY_MIN;
     // Monotonic second of the last transaction attempt, so a failure retries
     // rather than latching shut.
     let mut last_attempt: Option<u64> = None;
     let mut last_wake_seq: u32 = 0;
+    // Whether the broken stream has already been reported.
+    let mut input_reported = false;
 
     while !stop.load(Ordering::SeqCst) {
         // **Per field, not one bit for all of them.** A single `fresh` flag let
@@ -191,12 +202,14 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         // --- the input stream ---------------------------------------------
         // Retried on a slow cadence: a stream that came back is worth having,
         // and reopening is the only thing that has ever restored one.
-        if !input_ok && last_input_retry.elapsed() >= INPUT_RETRY_EVERY {
+        if !input_ok && last_input_retry.elapsed() >= input_backoff {
             last_input_retry = Instant::now();
+            input_backoff = (input_backoff * 2).min(INPUT_RETRY_MAX);
             if let Ok(d) = hid::open(opts.serial.as_deref()) {
                 device = Some(d);
                 input_ok = true;
-                say(Level::Info, "retrying the input stream");
+                // Silent. Whether it actually came back is decided by the read
+                // below, and announcing the attempt was half of the noise.
                 continue;
             }
         }
@@ -208,7 +221,14 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             sleep_interruptibly(Duration::from_millis(READ_TIMEOUT_MS as u64), &stop);
             Ok(None)
         } {
-            Ok(Some(buf)) => match buf.first().copied() {
+            Ok(Some(buf)) => {
+                // It came back. Worth one line, and worth resetting the backoff.
+                if input_reported {
+                    input_reported = false;
+                    input_backoff = INPUT_RETRY_MIN;
+                    say(Level::Info, "the input stream is back");
+                }
+                match buf.first().copied() {
                 Some(report::CHARGE_RUNTIME) => {
                     if let Some(c) = decode::charge(&buf) {
                         charge = Some(c);
@@ -227,7 +247,8 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     status_fresh = true;
                 }
                 _ => {}
-            },
+                }
+            }
             Ok(None) => {}
             Err(e) => {
                 // **Do not throw the device away.** The input stream and the
@@ -245,10 +266,20 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 // sooner. Degrading to a 2 s latency beats spinning.
                 if input_ok {
                     input_ok = false;
-                    say(
-                        Level::Warn,
-                        &format!("input stream failed ({e}); falling back to polling every {} s", POLL_EVERY.as_secs()),
-                    );
+                    // Once per *transition*, not once per attempt. A stream the
+                    // battery driver has taken over never comes back, and
+                    // saying so every minute for the life of the machine buries
+                    // the lines that matter.
+                    if !input_reported {
+                        input_reported = true;
+                        say(
+                            Level::Warn,
+                            &format!(
+                                "input stream failed ({e}); polling every {} s instead.                                  Expected if Windows has bound its own battery driver to the UPS.",
+                                POLL_EVERY.as_secs()
+                            ),
+                        );
+                    }
                 }
                 last_input_retry = Instant::now();
             }

@@ -487,13 +487,38 @@ if ($PerUser -and -not $TrayOnly) {
 }
 if ($Agent) {
     Write-Host ""
-    Write-Host "  The agent is in DRY RUN. It decides and logs; it cannot act."
+    # Asked rather than assumed. This used to announce DRY RUN unconditionally,
+    # which is a bad thing to be wrong about in either direction: it would tell
+    # someone their machine was unprotected when it was armed, or -- worse --
+    # the reverse.
+    $armed = $false
+    try {
+        $check = & (Join-Path $InstallDir "jdups-agent.exe") --check 2>&1
+        $armed = ($check | Select-String -Quiet "^\s*armed = true")
+    } catch { }
+
+    if ($armed) {
+        Write-Host "  The agent is ARMED. It will shut this machine down on a sustained" -ForegroundColor Yellow
+        Write-Host "  power failure." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  If PowerChute is still installed, set it to `"Do not shut down in the"
+        Write-Host "  event of a power outage`". Both write the same UPS countdown register"
+        Write-Host "  and the last writer wins."
+    } else {
+        Write-Host "  The agent is in DRY RUN: it decides and logs, and does not act."
+        Write-Host "  Set armed = true in jdups.conf when you want it to protect this machine."
+        Write-Host ""
+        Write-Host "  Until then nothing shuts this machine down on a power failure. If you"
+        Write-Host "  have removed PowerChute, it is currently unprotected."
+    }
+    Write-Host ""
     Write-Host "  Thresholds:  $LogDir\jdups.conf"
     Write-Host "  Its log:     $LogDir\jdups-agent-YYYY-MM.log"
     Write-Host "  Check them:  jdups-agent.exe --check"
+} else {
+    Write-Host ""
+    Write-Host "  This is the readout only -- nothing here shuts the machine down on a"
+    Write-Host "  power failure. Re-run with -Agent for that, or keep PowerChute."
 }
-Write-Host ""
-Write-Host "  PowerChute must stay installed and armed. jdups reads; it does not"
-Write-Host "  shut anything down, and nothing else will if you remove PowerChute."
 Write-Host ""
 Write-Host "Press Enter to close."; [void][Console]::ReadLine()
