@@ -41,6 +41,17 @@ Not asserted, measured. The plug-pull capture is `docs/plug-pull.txt`.
 - Report 19 pushes on change only; 12 and 6 are periodic.
 - `FF86:52` reads **8** for a plug-pull, across two events.
 - The sampler's event path wrote a real `online` row with `transfer=8`.
+- **Writes take about 30 ms to become visible to a read.** `HidD_SetFeature`
+  returns success immediately, but a read issued straight afterwards returns the
+  **old** value. Measured by round-tripping `AudibleAlarmControl`: 1 → 2 → 1,
+  each change ~30 ms to settle, confirmed on both of its mirror reports.
+
+  This is a trap with the shutdown transaction's name on it. "Verify every
+  write" obeyed literally, with an immediate readback, reports every successful
+  write as a failure — so a transaction would cancel every correct arming it
+  ever performed. Worse the other way: cancel a countdown with -1, read the
+  stale positive value, conclude the cancel failed, while the UPS is still
+  counting down to cutting power. `set_feature` polls until the device agrees.
 - The charge estimate is a *model*, not a measurement: it drops ~20 points
   within seconds of a transfer and recovers over hours, while battery voltage
   recovers in seconds. This shapes `policy.rs`'s settle window.

@@ -294,8 +294,12 @@ fn run_set(serial: Option<&str>, id: Option<u8>, value: Option<i16>) -> i32 {
     };
 
     let before = dev.feature(id).ok();
+    let started = std::time::Instant::now();
     match dev.set_feature_i16(id, value) {
         Ok(after) => {
+            // Printed because it is the number that justifies the readback
+            // polling loop, and the one to check if a future firmware is slower.
+            println!("settled in {} ms", started.elapsed().as_millis());
             let show = |v: Option<i16>| v.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
             let was = before
                 .as_deref()

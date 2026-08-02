@@ -67,6 +67,14 @@ const FILE_DEVICE_KEYBOARD: u32 = 0x0b;
 pub const IOCTL_HID_GET_FEATURE: u32 = ctl_code(FILE_DEVICE_KEYBOARD, 100, 2, 0);
 
 /// The four possible method encodings of function 100, for `--probe` to try.
+/// How long to wait for a feature write to become visible to a read.
+///
+/// Generous on purpose. The cost of waiting too long is a fraction of a second
+/// in a shutdown that is already budgeting a minute; the cost of not waiting
+/// long enough is concluding a write failed when it did not.
+const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 pub const FEATURE_IOCTL_CANDIDATES: [(&str, u32); 4] = [
     ("METHOD_BUFFERED", ctl_code(FILE_DEVICE_KEYBOARD, 100, 0, 0)),
     ("METHOD_IN_DIRECT", ctl_code(FILE_DEVICE_KEYBOARD, 100, 1, 0)),
@@ -573,6 +581,20 @@ impl Device {
     /// by name, and the only way to know the difference is to look. Callers
     /// compare; this does not, because "took but the device clamped it" is a
     /// legitimate outcome the caller may want to accept.
+    ///
+    /// **The readback has to wait, and this is measured, not assumed.** The
+    /// device does not commit a feature write before it will answer the next
+    /// read: writing 2 to `AudibleAlarmControl` and reading immediately returns
+    /// the *old* 1, while a read a moment later returns 2. An immediate readback
+    /// therefore reports every successful write as a failure — and a shutdown
+    /// transaction obeying "verify every write" literally would cancel every
+    /// correct arming it ever performed. Worse in the other direction: cancel a
+    /// countdown with -1, read the stale positive value, and conclude the cancel
+    /// failed while the UPS is still counting down to cutting power.
+    ///
+    /// So it polls until the device agrees, and gives up quietly rather than
+    /// erroring: what it holds at the deadline *is* the answer, and the caller
+    /// is better placed to decide what a disagreement means.
     pub fn set_feature(&self, report_id: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
         let len = self.info.feature_len.max(2) as usize;
         if 1 + payload.len() > len {
@@ -589,7 +611,18 @@ impl Device {
         if !ok {
             return Err(io::Error::last_os_error());
         }
-        self.get_feature_blocking(report_id)
+
+        let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            let back = self.get_feature_blocking(report_id)?;
+            if back.len() >= 1 + payload.len() && back[1..1 + payload.len()] == *payload {
+                return Ok(back);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(back);
+            }
+            std::thread::sleep(SETTLE_POLL);
+        }
     }
 
     /// Write a signed 16-bit value, little-endian, and say what came back.
