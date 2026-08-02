@@ -203,9 +203,15 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         let mut event = Event::None;
         match action {
             jdups::policy::Action::Shutdown(why) => {
+                // Fire on *becoming* committed, not on the elapsed count being
+                // zero. `now_s` is whole seconds and this loop runs several
+                // times within one, so testing the count announced the shutdown
+                // once per pass -- three identical warnings, and three toasts,
+                // in the same second. Caught by a real plug-pull, not by review.
+                let first = committed_at.is_none();
                 let at = *committed_at.get_or_insert(o.now_s);
                 let waited = o.now_s.saturating_sub(at);
-                if waited == 0 {
+                if first {
                     event = Event::Pending;
                     say(
                         Level::Act,

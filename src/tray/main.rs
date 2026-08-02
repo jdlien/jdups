@@ -92,6 +92,10 @@ struct App {
     /// legible as seconds, that they move one at a time. Each publish re-syncs
     /// this, so local drift cannot accumulate.
     pending_until: Option<u64>,
+    /// Whether the agent that published the pending shutdown can actually act.
+    /// The menu and the notification have to say "would" rather than "will"
+    /// while it cannot, or a dry run reads as an emergency.
+    agent_armed: bool,
     /// Whether the user has been told the UPS stopped answering. See `notice`:
     /// without it, the `Unknown` -> `Mains` settle that happens at every single
     /// startup is indistinguishable from a real reconnection.
@@ -311,6 +315,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             reported_missing: false,
             agent_seq: None,
             pending_until: None,
+            agent_armed: false,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
 
@@ -565,6 +570,7 @@ unsafe fn check_agent(app: *mut App) {
         (Phase::Pending, Some(n)) => Some(unsafe { GetTickCount64() } + n * 1000),
         _ => None,
     };
+    unsafe { (*app).agent_armed = st.armed };
     unsafe { set_pending(app, until) };
 
     let seen = unsafe { (*app).agent_seq };
@@ -783,6 +789,19 @@ unsafe fn show_menu(app: *mut App, x: i32, y: i32) {
     let na = |v: Option<String>| v.unwrap_or_else(|| "n/a".into());
 
     unsafe {
+        // A pending shutdown goes first, above the reading. The icon turning red
+        // and counting down is what sends someone here, and the menu answering
+        // "On battery, 83%, 31 min" while the icon says 15 leaves them to work
+        // out the connection themselves.
+        if let Some(n) = pending_seconds(app) {
+            let armed = (*app).agent_armed;
+            let line = if armed {
+                format!("Shutting down in {n} s")
+            } else {
+                format!("Would shut down in {n} s (dry run)")
+            };
+            add_item(menu, ID_STATUS, &line, true);
+        }
         add_item(menu, ID_STATUS, &snap.status_line(), true);
         AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
 

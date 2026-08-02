@@ -87,7 +87,15 @@ impl Journal {
                 if !self.announced {
                     self.announced = true;
                     self.last_beat_s = t.now_s;
-                    let verb = if t.dry_run { "would shut down now" } else { "shutting down now" };
+                    // The decision, not the act. The agent announces a grace
+                    // period straight after this and only then does anything,
+                    // so "would shut down now" read as a contradiction of the
+                    // "in 70 s" on the very next line.
+                    let verb = if t.dry_run {
+                        "decision reached: would shut down"
+                    } else {
+                        "decision reached: shutting down"
+                    };
                     return Some((
                         Level::Act,
                         format!(
@@ -245,7 +253,7 @@ mod tests {
 
         let acts: Vec<_> = lines.iter().filter(|(l, _)| *l == Level::Act).collect();
         assert_eq!(acts.len(), 1, "{lines:#?}");
-        assert!(acts[0].1.contains("would shut down now"), "{:?}", acts[0]);
+        assert!(acts[0].1.contains("would shut down"), "{:?}", acts[0]);
         assert!(acts[0].1.contains("runtime below the threshold"), "{:?}", acts[0]);
     }
 
@@ -356,8 +364,10 @@ mod tests {
             dry_run,
             stale: false,
         };
-        assert!(dry.note(&t(true)).unwrap().1.starts_with("would shut down"));
-        assert!(armed.note(&t(false)).unwrap().1.starts_with("shutting down"));
+        assert!(dry.note(&t(true)).unwrap().1.contains("would shut down"));
+        let armed_line = armed.note(&t(false)).unwrap().1;
+        assert!(armed_line.contains("shutting down"), "{armed_line}");
+        assert!(!armed_line.contains("would"), "{armed_line}");
     }
 
     #[test]
