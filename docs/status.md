@@ -5,27 +5,36 @@ context boundary — [implementation-plan.md](implementation-plan.md) carries th
 reasoning and the hardware map, so this is deliberately short and points there
 rather than repeating it.
 
-Last updated: 2026-08-01, 14 commits in.
+Last updated: 2026-08-01, 25 commits in.
 
 ## Built
 
-Phases 1–7 of the plan, and the first rung of Phase 8. Three binaries over one
-lib, one dependency (`windows-sys`), 127 tests, clippy clean.
+Phases 1–8 of the plan. Three binaries over one lib, one dependency
+(`windows-sys`), 151 tests, clippy clean.
+
+**It has replaced PowerChute.** A full armed shutdown ran on real hardware on
+2026-08-01: 60-second notice, forced shutdown, UPS cut output about two minutes
+later, and the machine came back by itself when mains returned. PowerChute is
+still installed and is set to "Do not shut down in the event of a power outage".
 
 | | |
 |---|---|
 | `jdups.exe` | `--once` `--watch` `--probe` `--list` `--log` `--sample` |
 | `jdups-tray.exe` | notification icon, menu, notifications; `--balloon` to fire a test one |
-| `jdups-agent.exe` | **dry run**: decides and logs, cannot act. `--check` `--print-config` |
-| `install.ps1` | machine-wide, or `-PerUser` with no elevation; `-Agent` for the dry run |
+| `jdups-agent.exe` | decides, warns, and shuts the machine down. `--check` `--print-config` |
+| `install.ps1` | machine-wide, or `-PerUser` with no elevation; `-Agent` adds the agent |
 | `uninstall.ps1` | only elevates if a machine-wide install is present |
 
-The agent is deliberately half a feature. `policy.rs` decides, `config.rs`
-guards the thresholds, `agent/journal.rs` decides what gets written and
-`agent/watch.rs` drives the device. **`armed = true` is refused at startup** —
-the shutdown transaction is a separate change with its own testing ladder, and
-shipping both at once would mean the first run of the transaction is also its
-first test.
+`policy.rs` decides, `config.rs` guards the thresholds, `agent/journal.rs`
+decides what gets written, `agent/watch.rs` drives the device, and
+`agent/shutdown.rs` is the transaction. **`armed = false` is the default and
+what a missing config means**, so no accident of packaging produces an agent
+that acts.
+
+The interlock is stated, not enforced: PowerChute and jdups write the same UPS
+countdown register and the last writer wins. Whether PowerChute is *armed* lives
+inside its own configuration and is not visible from outside, so the agent says
+so at startup rather than pretending to check.
 
 ## Proven against the hardware
 
@@ -94,8 +103,15 @@ Be honest about these rather than assuming they work.
   Two defects only a real run could find, both now fixed: the warning fired
   three times inside one second (`now_s` is whole seconds, the loop is faster
   than that), and the menu still read "On battery" while the icon counted down.
-- Everything in Phase 8 past the decision: the service, the transaction, the
-  restart handshake.
+- **`jdups-agent.exe` is a scheduled task, not a service.** So it cannot take
+  `SERVICE_CONTROL_PRESHUTDOWN` or power notifications, which means: sleep and
+  hibernate are unhandled, and there is no clean last gasp on an ordinary
+  reboot. Observed directly — the "final read" on the way out never fired during
+  the PowerChute shutdown, because a task has no console to receive
+  `CTRL_SHUTDOWN_EVENT` on. This is the largest remaining gap.
+- **Report 64 (`FF86:7C`)**: whether it is written or merely reflects an armed
+  countdown is still unknown. The first sample already had it set, so the order
+  was never observed. The transaction does not write it and works anyway.
 
 ## Next
 
@@ -123,21 +139,22 @@ Be honest about these rather than assuming they work.
    **Take them out again afterwards.** `runtime_threshold_s = 3600` means any
    loss of mains qualifies instantly, which is inert today and would not be.
 
-**Phase 8, and only in this order.** See the plan's Phase 8 for the full
-argument; the short version, with the first rung now done:
+**What is left, in rough order of value:**
 
-0. ~~The decision, wired to the device, in dry run.~~ **Built.** Run it for
-   weeks before touching anything below, and tune `jdups.conf` from what it
-   says. A threshold chosen from a month of this machine's own power is worth
-   more than every other item on this list.
-1. `jdups-agent.exe` as a **Windows service**, not a scheduled task — a task
-   cannot receive `SERVICE_CONTROL_PRESHUTDOWN` or power notifications, and
-   sleep/hibernate/Fast Startup are otherwise unhandled. The dry run is a
-   scheduled task today, which is fine precisely because it cannot act.
-2. The shutdown **transaction** with a persisted intent record, ordered so the
-   OS commits before the UPS is armed. `SE_SHUTDOWN_NAME` must be explicitly
-   enabled and `AdjustTokenPrivileges` checked for `ERROR_NOT_ALL_ASSIGNED`.
-3. ~~The restart handshake.~~ **Settled 2026-08-01, and there isn't one.** A real
+1. **The alarm toggle in the tray.** Confirmed possible; see the pinned section
+   below. Small, and the nicest remaining bit of user-facing work.
+2. **`jdups-agent.exe` as a Windows service.** The last structural gap: a
+   scheduled task cannot take `SERVICE_CONTROL_PRESHUTDOWN` or power
+   notifications, so sleep, hibernate and Fast Startup go unhandled and there is
+   no clean stand-down during an ordinary reboot. Also lets it hold off idle
+   sleep while on battery, and subsume the sampler, which already holds the
+   stream continuously.
+3. **Prove `uninstall.ps1`**, the one script never executed.
+4. Retire PowerChute entirely, once a few real outages have gone by.
+
+**Settled, kept for the record:**
+
+- ~~The restart handshake.~~ **Settled 2026-08-01, and there isn't one.** A real
    PowerChute shutdown was watched register by register. **Report 65 (`FF86:7D`)
    is the shutdown countdown** — set to 120, decremented by the UPS in real time,
    output cut at zero. **Report 64 (`FF86:7C`) is the armed flag.** **Report 21,
@@ -149,8 +166,13 @@ argument; the short version, with the first rung now done:
 
    Still open, and small: whether 64 is written or merely reflects an armed
    countdown. The first sample already had it set, so the order was never seen.
-4. Dry-run for weeks. Absurd thresholds to test the trigger cheaply. Only then
-   realistic ones, and only then disarm PowerChute.
+- ~~The shutdown transaction.~~ **Built and proven armed**, `agent/shutdown.rs`.
+  Privilege enabled and checked for `ERROR_NOT_ALL_ASSIGNED`; intent record
+  persisted and reconciled on the next start; `InitiateShutdownW` with a 10 s
+  grace so the shutdown is *accepted but not yet destructive* while the UPS is
+  armed, and `AbortSystemShutdownW` if the arming fails. `SHUTDOWN_INSTALL_UPDATES`
+  is deliberately **not** passed: a power-cut shutdown that begins installing a
+  feature update would outlast any countdown sized from ordinary ones.
 
 **Until the agent is proven, PowerChute stays installed and armed.**
 
