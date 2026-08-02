@@ -23,6 +23,12 @@
 //! 3. **`ShutdownImminent` is device-authoritative.** The UPS says when it is
 //!    about to cut output, which beats anything computed from thresholds.
 
+/// The grace period the transaction asks Windows for, mirrored here so
+/// `validate` can reserve it. Kept deliberately small and separate: this module
+/// does no I/O and must not depend on the agent, but a threshold that ignores
+/// this margin is a threshold that lies.
+pub const OS_GRACE_ALLOWANCE_S: u64 = 10;
+
 /// What the agent should do about the world as it currently stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -154,6 +160,11 @@ impl Config {
         if self.max_on_battery_s < 60 {
             return Err("max_on_battery_s below a minute is not a backstop");
         }
+        // Unbounded above, it is not a backstop either: with charge and runtime
+        // both unreadable the agent would sit in Warn until the battery died.
+        if self.max_on_battery_s > 24 * 3600 {
+            return Err("max_on_battery_s above a day is not a backstop at all");
+        }
         // Not bounded below: zero is a legitimate choice for a machine nobody
         // sits at, where the warning has no one to reach and the seconds are
         // better spent shutting down.
@@ -166,8 +177,22 @@ impl Config {
         if self.warn_before_s > 600 {
             return Err("warn_before_s above ten minutes spends the battery on a notification");
         }
-        if self.warn_before_s >= self.runtime_threshold_s as u64 {
-            return Err("warn_before_s must leave time to shut down after the warning");
+        // **The whole sequence has to fit in the threshold, not just the
+        // warning.** Firing at `runtime_threshold_s` only helps if what follows
+        // finishes before the battery does, and what follows is: the debounce
+        // that confirmed it, the warning, the OS grace, and the shutdown itself.
+        // `warn_before_s < runtime_threshold_s` alone accepted a 299 s warning
+        // against a 300 s threshold with a 120 s shutdown after it, which begins
+        // going down with no predicted runtime left.
+        let needed = self
+            .debounce_s
+            .saturating_add(self.warn_before_s)
+            .saturating_add(OS_GRACE_ALLOWANCE_S)
+            .saturating_add(self.os_shutdown_s as u64);
+        if needed >= self.runtime_threshold_s as u64 {
+            return Err(
+                "debounce + warn_before_s + os_shutdown_s must fit inside runtime_threshold_s,                  or the battery runs out mid-shutdown",
+            );
         }
         Ok(())
     }
@@ -275,6 +300,11 @@ impl State {
             .last_fresh
             .is_none_or(|t| o.now_s.saturating_sub(t) > cfg.stale_after_s);
         if stale {
+            // **The debounce restarts.** `qualifying_since` used to survive
+            // this, so one low sample, a long silence, and one more low sample
+            // satisfied "held continuously" -- which is the exact jitter
+            // protection the debounce exists to provide, defeated by the gap.
+            self.qualifying_since = None;
             return Action::Warn;
         }
 
@@ -617,5 +647,51 @@ mod tests {
             let a = s.observe(&battery(t, 10, 60), &c);
             assert!(!a.is_shutdown(), "shut down on a backwards clock at t={t}");
         }
+    }
+
+    /// Found by review. `warn_before_s < runtime_threshold_s` was the only
+    /// check, so a 299 s warning against a 300 s threshold with a 120 s
+    /// shutdown behind it passed -- and began going down with no predicted
+    /// runtime left at all.
+    #[test]
+    fn the_whole_sequence_has_to_fit_in_the_threshold() {
+        let bad = Config { runtime_threshold_s: 300, warn_before_s: 299, os_shutdown_s: 120, ..cfg() };
+        assert!(bad.validate().is_err(), "accepted a warning that eats the whole budget");
+
+        // The default must still fit, or the shipped configuration is invalid.
+        let d = Config::default();
+        let needed = d.debounce_s + d.warn_before_s + OS_GRACE_ALLOWANCE_S + d.os_shutdown_s as u64;
+        assert!(needed < d.runtime_threshold_s as u64, "default needs {needed} s of {}", d.runtime_threshold_s);
+        assert!(d.validate().is_ok());
+    }
+
+    #[test]
+    fn an_unbounded_backstop_is_not_a_backstop() {
+        assert!(Config { max_on_battery_s: u64::MAX, ..cfg() }.validate().is_err());
+    }
+
+    /// Found by review. A qualifying sample, a long stretch with no trustworthy
+    /// reading, then one more qualifying sample used to satisfy "held
+    /// continuously" -- defeating the jitter protection with a gap rather than
+    /// with data.
+    #[test]
+    fn a_stale_gap_restarts_the_debounce() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        let t0 = c.settle_s + 1;
+        // One qualifying reading.
+        assert_eq!(s.observe(&battery(t0, 80, 120), &c), Action::Warn);
+        // Then nothing believable for well past the staleness window.
+        for t in t0 + 1..t0 + 1 + c.stale_after_s * 3 {
+            s.observe(&Observation { fresh: false, ..battery(t, 80, 120) }, &c);
+        }
+        // A single fresh qualifying reading must not now count as sustained.
+        let t = t0 + 1 + c.stale_after_s * 3;
+        assert_eq!(
+            s.observe(&battery(t, 80, 120), &c),
+            Action::Warn,
+            "a gap counted as the condition holding"
+        );
     }
 }

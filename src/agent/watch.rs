@@ -38,6 +38,9 @@ const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 /// How often to try to get a failed input stream back.
 const INPUT_RETRY_EVERY: Duration = Duration::from_secs(60);
+/// How long to wait before trying a failed shutdown transaction again. Long
+/// enough not to hammer `InitiateShutdownW`, short enough to matter on battery.
+const RETRY_SHUTDOWN_S: u64 = 30;
 
 pub struct Options {
     pub settings: Settings,
@@ -108,9 +111,19 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     // device; see the error arm below.
     let mut input_ok = true;
     let mut last_input_retry = Instant::now();
+    // Monotonic second of the last transaction attempt, so a failure retries
+    // rather than latching shut.
+    let mut last_attempt: Option<u64> = None;
 
     while !stop.load(Ordering::SeqCst) {
-        let mut fresh = false;
+        // **Per field, not one bit for all of them.** A single `fresh` flag let
+        // a successful charge read mark a *stale status* current, and a status
+        // read mark stale numbers current. The first is the dangerous one: the
+        // last status says mains, status reads then start failing during an
+        // outage while charge reports keep arriving, and the outage is never
+        // latched because every observation still claims to be fresh.
+        let mut status_fresh = false;
+        let mut numbers_fresh = false;
 
         // --- connect ------------------------------------------------------
         if device.is_none() {
@@ -149,9 +162,19 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                     // Keep deciding while disconnected. The latch and the
                     // backstop are the whole point: an outage that takes the USB
                     // link with it must not become an agent that sits quiet.
+                    //
+                    // **And keep acting on it.** This used to call `tick` and
+                    // drop the Action on the floor, so the backstop could fire
+                    // with nothing listening -- in exactly the scenario it was
+                    // written for. There is no device to arm, but the machine
+                    // can still be shut down, which is the half that matters.
                     let o = observe(&start, false, &status, charge, runtime_s);
                     let stale = last_answer.elapsed().as_secs() > cfg.stale_after_s;
-                    tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
+                    let action = tick(&mut state, &mut journal, &o, &cfg, dry_run, stale, &say);
+                    if action.is_shutdown() && !dry_run && committed_at.is_none() {
+                        say(Level::Act, "the UPS is unreachable and the deadline has passed; shutting down without it");
+                        committed_at = Some(o.now_s);
+                    }
 
                     sleep_interruptibly(backoff.min(POLL_EVERY), &stop);
                     backoff = (backoff * 2).min(RETRY_MAX);
@@ -185,11 +208,11 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 Some(report::CHARGE_RUNTIME) => {
                     if let Some(c) = decode::charge(&buf) {
                         charge = Some(c);
-                        fresh = true;
+                        numbers_fresh = true;
                     }
                     if let Some(r) = decode::runtime_s(&buf) {
                         runtime_s = Some(r);
-                        fresh = true;
+                        numbers_fresh = true;
                     }
                 }
                 // The urgent one. Taken straight off the stream rather than
@@ -197,7 +220,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 // it announcing that it is about to cut output.
                 Some(report::PRESENT_STATUS) | Some(report::SHUTDOWN_IMMINENT) => {
                     status = Some(dev.status_of(&buf, true));
-                    fresh = true;
+                    status_fresh = true;
                 }
                 _ => {}
             },
@@ -233,7 +256,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             last_poll = Instant::now();
             if let Ok(b) = dev.feature(report::PRESENT_STATUS) {
                 status = Some(dev.status_of(&b, false));
-                fresh = true;
+                status_fresh = true;
             }
             if let Ok(b) = dev.feature(report::CHARGE_RUNTIME) {
                 if let Some(c) = decode::charge(&b) {
@@ -242,11 +265,15 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 if let Some(r) = decode::runtime_s(&b) {
                     runtime_s = Some(r);
                 }
-                fresh = true;
+                numbers_fresh = true;
             }
         }
 
-        let o = observe(&start, fresh, &status, charge, runtime_s);
+        // The status is what `fresh` means to `policy`: it gates the latch, and
+        // the latch is what an outage hangs on. Numbers going stale on their own
+        // is survivable; a stale status pretending to be current is not.
+        let o = observe(&start, status_fresh, &status, charge, runtime_s);
+        let _ = numbers_fresh;
         if o.fresh {
             last_answer = Instant::now();
         }
@@ -298,7 +325,16 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                         ),
                     );
                 }
-                if waited >= cfg.warn_before_s && published.event != Event::Shutdown {
+                // Guarded on an attempt counter, not on the published event.
+                // Publishing Shutdown *before* calling execute meant an abort
+                // left the guard permanently closed: the policy stayed in
+                // shutdown, and every later pass skipped the retry, so one
+                // transient failure under the backstop left the machine running
+                // to battery exhaustion.
+                let due = waited >= cfg.warn_before_s
+                    && last_attempt.is_none_or(|t: u64| o.now_s.saturating_sub(t) >= RETRY_SHUTDOWN_S);
+                if due {
+                    last_attempt = Some(o.now_s);
                     event = Event::Shutdown;
                     if dry_run {
                         say(Level::Act, "the grace period is up: this is where it would shut down");
@@ -332,6 +368,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             }
             _ => {
                 if committed_at.take().is_some() {
+                    last_attempt = None;
                     event = Event::Cancelled;
                     say(Level::Act, "shutdown cancelled: the machine is no longer past the trigger");
                 }

@@ -71,7 +71,7 @@ pub fn execute(dev: &Device, dir: &Path, os_seconds: u32, say: &dyn Fn(&str)) ->
     // --- 2. the intent record --------------------------------------------
     // Written before anything happens, so a crash between the two halves leaves
     // evidence. The next start reads this and reconciles; see `reconcile`.
-    let cutoff = (OS_GRACE_S + os_seconds).min(i16::MAX as u32) as i16;
+    let cutoff = OS_GRACE_S.saturating_add(os_seconds).min(i16::MAX as u32) as i16;
     if let Err(e) = write_intent(dir, cutoff) {
         // Not fatal. An unrecorded shutdown is worse to diagnose, not worse to
         // survive, and refusing to protect the machine because a log file could
@@ -102,28 +102,73 @@ pub fn execute(dev: &Device, dir: &Path, os_seconds: u32, say: &dyn Fn(&str)) ->
                 Ok(None) => "it returned nothing readable".to_string(),
                 Err(e) => format!("{e}"),
             };
-            say(&format!("arming the UPS failed ({what}); calling the shutdown off"));
-            unwind(dev, dir, say);
-            Outcome::Aborted(format!("could not arm the UPS: {what}"))
+            say(&format!("arming the UPS failed ({what}); unwinding"));
+            if unwind(dev, dir, say) {
+                Outcome::Aborted(format!("could not arm the UPS: {what}"))
+            } else {
+                // The UPS could not be confirmed disarmed, so the shutdown was
+                // deliberately left running. Reporting this as Aborted would
+                // tell the caller the machine is staying up, which is the one
+                // thing it must not believe here.
+                Outcome::Committed { ups_cutoff_s: cutoff }
+            }
         }
     }
 }
 
-/// Put everything back. Called only when something has already gone wrong, so
-/// it reports each step rather than failing fast.
-fn unwind(dev: &Device, dir: &Path, say: &dyn Fn(&str)) {
+/// Put everything back, in the only order that is safe.
+///
+/// **The UPS first, and Windows only if the UPS is confirmed disarmed.** This
+/// was the other way round and that was wrong, in the dangerous direction: the
+/// arming may have taken and merely failed to read back, so aborting Windows
+/// first can leave a *running* machine with a live countdown against it. That is
+/// the filesystem-corrupting case the whole ordering argument exists to avoid.
+///
+/// Read the two outcomes off each other:
+///
+/// - **Cancel confirmed** — nothing is armed, so stopping the shutdown is safe
+///   and the machine stays up.
+/// - **Cancel failed or unconfirmable** — something may still cut power at a
+///   known time. Letting Windows continue is then the *better* branch, not the
+///   failure branch: the machine is off before the cut instead of running into
+///   it. So the abort is deliberately skipped.
+///
+/// Returns whether the machine is expected to stay up.
+fn unwind(dev: &Device, dir: &Path, say: &dyn Fn(&str)) -> bool {
+    // Cancelling something already cancelled costs one write, so this runs
+    // whether or not the arming is believed to have taken.
+    let disarmed = match dev.set_feature_i16(report::APC_SHUTDOWN_COUNTDOWN, -1) {
+        Ok(Some(-1)) => {
+            say("UPS countdown confirmed cancelled");
+            true
+        }
+        Ok(v) => {
+            say(&format!("ALARM: the UPS countdown reads {v:?}, not cancelled"));
+            false
+        }
+        Err(e) => {
+            say(&format!("ALARM: could not cancel the UPS countdown: {e}"));
+            false
+        }
+    };
+
+    if !disarmed {
+        say("LETTING THE SHUTDOWN PROCEED: the UPS may still cut power, and a \
+             machine that is off when that happens beats one that is running");
+        // The intent record stays. Something is armed and unaccounted for, and
+        // that is exactly what reconciliation is for.
+        return false;
+    }
+
     match abort_os_shutdown() {
         Ok(()) => say("Windows shutdown aborted"),
-        Err(e) => say(&format!("ALARM: could not abort the Windows shutdown: {e}")),
-    }
-    // Belt and braces: the arming may have half taken. Cancelling something
-    // already cancelled costs one write.
-    match dev.set_feature_i16(report::APC_SHUTDOWN_COUNTDOWN, -1) {
-        Ok(Some(-1)) => say("UPS countdown confirmed cancelled"),
-        Ok(v) => say(&format!("ALARM: the UPS countdown reads {v:?}, not cancelled")),
-        Err(e) => say(&format!("ALARM: could not cancel the UPS countdown: {e}")),
+        Err(e) => say(&format!(
+            "ALARM: the UPS is disarmed but the Windows shutdown could not be aborted ({e}); \
+             the machine will go down cleanly and stay down"
+        )),
     }
     let _ = clear_intent(dir);
+    true
 }
 
 /// On startup: is there a countdown running that nobody wants?
@@ -147,22 +192,46 @@ pub fn reconcile(dev: &Device, dir: &Path, on_mains: bool, say: &dyn Fn(&str)) {
         .filter(|b| b.len() >= 3)
         .map(|b| i16::from_le_bytes([b[1], b[2]]));
 
-    match (pending, on_mains) {
+    // **The intent is only cleared once the situation is understood.** Every
+    // path used to clear it, including the ones that had just failed to read
+    // the device -- so a single transient HID error retired the only record
+    // that a countdown might be live, with no retry, because `reconcile` runs
+    // once per process.
+    let settled = match (pending, on_mains) {
         (Some(n), true) if n > 0 => {
             say(&format!("a UPS countdown of {n} s is running on mains; cancelling it"));
             match dev.set_feature_i16(report::APC_SHUTDOWN_COUNTDOWN, -1) {
-                Ok(Some(-1)) => say("cancelled"),
-                other => say(&format!("ALARM: the cancel did not take: {other:?}")),
+                Ok(Some(-1)) => {
+                    say("cancelled");
+                    true
+                }
+                other => {
+                    say(&format!("ALARM: the cancel did not take: {other:?}"));
+                    false
+                }
             }
         }
         (Some(n), false) if n > 0 => {
             // Leave it. It is doing its job, and clearing it here could be the
-            // difference between the machine coming back and not.
+            // difference between the machine coming back and not. Not settled
+            // either: it still needs looking at once mains returns.
             say(&format!("a UPS countdown of {n} s is running on battery; leaving it alone"));
+            false
         }
-        _ => say("no countdown pending; the shutdown completed normally"),
+        (Some(_), _) => {
+            say("no countdown pending; the shutdown completed normally");
+            true
+        }
+        // The device did not answer. That is not evidence of anything, and
+        // treating it as "nothing pending" is how the record gets lost.
+        (None, _) => {
+            say("ALARM: could not read the UPS countdown; keeping the intent record");
+            false
+        }
+    };
+    if settled {
+        let _ = clear_intent(dir);
     }
-    let _ = clear_intent(dir);
 }
 
 fn intent_path(dir: &Path) -> std::path::PathBuf {
