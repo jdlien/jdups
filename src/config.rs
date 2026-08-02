@@ -140,6 +140,11 @@ pub fn load(path: &Path) -> Result<Settings, String> {
 /// Someone editing thresholds is usually editing several, and a parser that
 /// stops at the first mistake turns one round trip into four.
 pub fn parse(text: &str) -> Result<Settings, Vec<String>> {
+    // Windows PowerShell 5.1 writes a BOM for `-Encoding UTF8`, and a BOM is not
+    // whitespace, so it glues itself to the first key and produces an "unknown
+    // setting" for a file that looks perfectly correct in an editor. An agent
+    // refusing to start over an invisible character is a bad way to find out.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut s = Settings::default();
     let mut errs = Vec::new();
     let mut seen: Vec<&str> = Vec::new();

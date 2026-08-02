@@ -153,27 +153,45 @@ impl Status {
     /// disable the warning without saying so.
     pub fn parse(text: &str) -> Option<Status> {
         let mut st = Status::default();
-        let mut complete = false;
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
+            // **`end` ends it.** Parsing used to continue past the terminator, so
+            // a complete record followed by a partial one -- an interrupted
+            // rename, two writes into the same file -- parsed as a hybrid, with
+            // the trailing fragment overriding fields of the record that had
+            // already been declared complete.
             if line == "end" {
-                complete = true;
-                continue;
+                return Some(st);
             }
             let Some((k, v)) = line.split_once('=') else { continue };
             let (k, v) = (k.trim(), v.trim());
+            // **A known field this version cannot parse fails the record.**
+            // Defaulting it looked safe and was not: a corrupted `event` became
+            // `None` while the sequence still advanced, so the tray recorded
+            // that sequence as seen and then ignored the corrected publication
+            // behind it -- dropping a shutdown warning in silence.
             match k {
                 "updated" => st.updated = v.to_string(),
-                "armed" => st.armed = v == "true",
-                "phase" => st.phase = Phase::parse(v).unwrap_or(Phase::Idle),
-                "seq" => st.seq = v.parse().unwrap_or(0),
-                "event" => st.event = Event::parse(v).unwrap_or(Event::None),
-                "seconds_left" => st.seconds_left = v.parse().ok(),
+                "armed" => {
+                    st.armed = match v {
+                        "true" => true,
+                        "false" => false,
+                        _ => return None,
+                    }
+                }
+                "phase" => st.phase = Phase::parse(v)?,
+                "seq" => st.seq = v.parse().ok()?,
+                "event" => st.event = Event::parse(v)?,
+                "seconds_left" => st.seconds_left = Some(v.parse().ok()?),
                 "reason" => st.reason = Some(v.to_string()),
+                // Unknown keys stay ignored: the two binaries can be different
+                // versions mid-upgrade, and a tray that refused a newer file
+                // would disable the warning without saying so.
                 _ => {}
             }
         }
-        complete.then_some(st)
+        // No terminator: not a record.
+        None
     }
 }
 
@@ -285,5 +303,30 @@ mod tests {
         // The temporary must not be left lying about next to the real one.
         assert!(!dir.join("agent-status.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A known field this version cannot parse must fail the whole record.
+    /// Defaulting it advanced the sequence while losing the event, so the tray
+    /// marked that sequence seen and then ignored the corrected publication --
+    /// dropping a shutdown warning in silence.
+    #[test]
+    fn a_corrupt_known_field_rejects_the_record() {
+        for bad in ["phase = wat", "event = wat", "seq = wat", "seconds_left = wat"] {
+            let text = sample().to_text().replace("end
+", &format!("{bad}
+end
+"));
+            assert_eq!(Status::parse(&text), None, "accepted {bad:?}");
+        }
+    }
+
+    /// `end` ends it. Two records in one file -- an interrupted rename, a double
+    /// write -- must not merge, with the fragment overriding the complete one.
+    #[test]
+    fn parsing_stops_at_the_terminator() {
+        let text = format!("{}seq = 999
+phase = idle
+", sample().to_text());
+        assert_eq!(Status::parse(&text), Some(sample()), "read past the terminator");
     }
 }

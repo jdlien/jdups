@@ -84,7 +84,26 @@ pub const PAGE_APC: u16 = 0xFF86;
 /// A report whose ID or length is not what we asked for is an error, never
 /// something to decode. A short read that got silently zero-extended would
 /// produce a plausible reading, which is the worst possible failure here.
+/// Every report on this device is **five bytes**, so anything shorter is not a
+/// report and must not be decoded as one.
+pub const REPORT_LEN: usize = 5;
+
 fn payload(buf: &[u8], id: u8, need: usize) -> Option<&[u8]> {
+    // The length check used to be against the *field* rather than the report,
+    // which is far weaker than it looks: `charge(&[0x0c, 0])` returned `Some(0)`
+    // from two bytes and `runtime_s` accepted four. A truncated read could
+    // therefore decode as a perfectly plausible flat battery, and the agent acts
+    // on exactly that number.
+    if buf.len() < REPORT_LEN {
+        return None;
+    }
+    // The field check stays too: a report can be the right length and still not
+    // reach the field being asked for.
+    //
+    // Note the ID comparison does nothing on the *feature* path -- the caller
+    // writes `buf[0]` before the read and the driver leaves it alone, so it
+    // compares our own write to itself. It earns its keep on input reports,
+    // where the device chooses the ID and the stream is multiplexed.
     if buf.first().copied() != Some(id) || buf.len() < 1 + need {
         return None;
     }
@@ -441,5 +460,18 @@ mod tests {
     fn an_unknown_usage_is_ignored_not_misfiled() {
         let s = PresentStatus::from_usages(&[(PAGE_APC, 0x60), (0x99, 0x01)]);
         assert_eq!(s, PresentStatus::default());
+    }
+
+    /// Found by review, and it is the one with a path to a spurious shutdown:
+    /// a short read decoding as a plausible flat battery. The length check used
+    /// to be against the *field*, so two bytes were enough for a charge.
+    #[test]
+    fn a_short_report_is_not_a_report() {
+        assert_eq!(charge(&[report::CHARGE_RUNTIME, 0]), None);
+        assert_eq!(charge(&[report::CHARGE_RUNTIME, 42]), None);
+        assert_eq!(runtime_s(&[report::CHARGE_RUNTIME, 0, 0, 0]), None);
+        assert_eq!(load_pct(&[report::LOAD, 0]), None);
+        // Full length still decodes.
+        assert_eq!(charge(&[report::CHARGE_RUNTIME, 42, 0, 0, 0]), Some(42));
     }
 }

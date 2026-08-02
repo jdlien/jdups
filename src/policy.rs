@@ -179,6 +179,12 @@ impl Config {
         if self.max_on_battery_s > 24 * 3600 {
             return Err("max_on_battery_s above a day is not a backstop at all");
         }
+        // Unbounded above, a reading never goes stale, so one old low sample
+        // keeps counting toward a shutdown long after the device stopped
+        // answering. `u64::MAX` used to be accepted.
+        if self.stale_after_s < 5 || self.stale_after_s > 3600 {
+            return Err("stale_after_s must be between 5 seconds and an hour");
+        }
         // Not bounded below: zero is a legitimate choice for a machine nobody
         // sits at, where the warning has no one to reach and the seconds are
         // better spent shutting down.
