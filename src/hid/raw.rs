@@ -615,7 +615,7 @@ impl Device {
         let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
         loop {
             let back = self.get_feature_blocking(report_id)?;
-            if back.len() >= 1 + payload.len() && back[1..1 + payload.len()] == *payload {
+            if back.len() > payload.len() && back[1..1 + payload.len()] == *payload {
                 return Ok(back);
             }
             if std::time::Instant::now() >= deadline {
