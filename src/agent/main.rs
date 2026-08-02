@@ -31,7 +31,7 @@ USAGE:
     jdups-agent --check
     jdups-agent --print-config
 
-    --config PATH    Settings file (default: jdups.conf beside this binary)
+    --config PATH    Settings file (default: %ProgramData%\\jdups\\jdups.conf)
     --dir PATH       Where to write the agent log (default %ProgramData%\\jdups)
     --serial SERIAL  Select a specific unit when more than one is attached
     -q               Do not echo to stdout; write only to the log
@@ -106,6 +106,10 @@ fn main() {
         println!("config   {}", path.display());
         if !path.exists() {
             println!("         (no such file, so these are the built-in defaults)");
+            println!("         looked in, in order:");
+            for p in jdups::config::search_paths() {
+                println!("           {}", p.display());
+            }
         }
         for line in settings.describe() {
             println!("  {line}");

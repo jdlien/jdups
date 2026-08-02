@@ -65,16 +65,50 @@ impl Settings {
     }
 }
 
-/// Where the config lives when nobody says otherwise: beside the binary.
+/// Everywhere a config might live, in the order they win.
 ///
-/// `%ProgramFiles%\jdups` for a machine-wide install, which is
-/// Administrators-write by default, so the file the SYSTEM agent trusts is not
-/// one an ordinary user can edit. Beside-the-binary rather than an absolute path
-/// so a per-user install, or a copy of the tree run out of `target\release`,
-/// finds its own config instead of a stranger's.
+/// `%ProgramData%\jdups` first, which is where a machine-wide install puts it.
+/// That is the conventional home for machine-wide mutable configuration on
+/// Windows — `%ProgramFiles%` is for files an installer writes once and nothing
+/// edits afterwards, and this is a file meant to be edited.
+///
+/// **The privilege boundary survives the move**, which is the only reason it is
+/// allowed. `%ProgramData%` inherits an ACL that lets ordinary users create
+/// files, and a SYSTEM process taking thresholds from a user-writable path is
+/// shutdown-as-a-service. The installer does not inherit it: it strips
+/// inheritance from `%ProgramData%\jdups` and sets SYSTEM and Administrators
+/// full, Users read. That directory is therefore exactly as safe as Program
+/// Files was, and **the installer is what makes it so** — this is the second
+/// thing depending on that ACL, after the log.
+///
+/// `%LOCALAPPDATA%` second, for a `-PerUser` install. No boundary is crossed
+/// there: the agent runs as the same account that can write it. Note that a
+/// SYSTEM agent resolves this to the *system* profile, not to anyone's real one.
+///
+/// Beside the binary last, so a tree run out of `target\release` can carry its
+/// own config without touching the installed one.
+pub fn search_paths() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = crate::logfile::candidate_dirs()
+        .into_iter()
+        .map(|d| d.join("jdups.conf"))
+        .collect();
+    if let Some(beside) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("jdups.conf"))) {
+        v.push(beside);
+    }
+    v
+}
+
+/// The config that will actually be read.
+///
+/// The first that exists, or the first candidate if none do — so `--check` can
+/// name the file it looked for rather than saying nothing.
 pub fn default_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("jdups.conf"))
+    let paths = search_paths();
+    paths
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .or_else(|| paths.into_iter().next())
 }
 
 /// Read and validate, or explain why not.

@@ -291,12 +291,21 @@ if (-not $TrayOnly) {
 
 if ($Agent) {
     try {
-        # The settings file lives beside the binary, not in the log directory:
-        # under a machine-wide install that puts it in Program Files, which is
-        # Administrators-write, so the file a SYSTEM agent trusts is not one an
-        # ordinary user can edit. Written only if absent -- an upgrade must
-        # never silently replace thresholds somebody chose.
-        $conf = Join-Path $InstallDir "jdups.conf"
+        # The settings file goes in the *log* directory, not beside the binary.
+        # Program Files is for files an installer writes once and nothing edits
+        # afterwards; this one is meant to be edited, and %ProgramData% is where
+        # machine-wide mutable configuration belongs.
+        #
+        # It is only as safe as the ACL applied above, and that is not a
+        # throwaway remark: %ProgramData% inherits permissions that let ordinary
+        # users create files, and a SYSTEM agent reading thresholds from a
+        # user-writable path is shutdown-as-a-service. The block above strips
+        # inheritance and grants Users read only, which is what makes this
+        # directory a legitimate home for it.
+        #
+        # Written only if absent -- an upgrade must never silently replace
+        # thresholds somebody chose.
+        $conf = Join-Path $LogDir "jdups.conf"
         if (Test-Path $conf) {
             Write-Host "  kept existing jdups.conf"
         } else {
@@ -407,7 +416,7 @@ if ($PerUser -and -not $TrayOnly) {
 if ($Agent) {
     Write-Host ""
     Write-Host "  The agent is in DRY RUN. It decides and logs; it cannot act."
-    Write-Host "  Thresholds:  $InstallDir\jdups.conf"
+    Write-Host "  Thresholds:  $LogDir\jdups.conf"
     Write-Host "  Its log:     $LogDir\jdups-agent-YYYY-MM.log"
     Write-Host "  Check them:  jdups-agent.exe --check"
 }

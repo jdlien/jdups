@@ -104,9 +104,9 @@ Start-Sleep -Milliseconds 300
 foreach ($d in ($MachineDirs[0], $UserDirs[0])) {
     if (-not (Test-Path $d)) { continue }
     try {
-        # jdups.conf goes with them. Without the agent it means nothing, and
-        # tuned thresholds are not lost: the agent writes its whole effective
-        # config into the log every time it starts, and the log is kept.
+        # jdups.conf is no longer here -- it lives with the logs, and is kept or
+        # removed with them. Still listed so an upgrade from a build that put it
+        # beside the binary does not strand a copy that nothing reads.
         foreach ($exe in @("jdups.exe", "jdups-tray.exe", "jdups-agent.exe", "jdups.conf")) {
             $p = Join-Path $d $exe
             if (Test-Path $p) { Remove-Item $p -Force }
@@ -131,7 +131,8 @@ foreach ($d in ($MachineDirs[1], $UserDirs[1])) {
             Write-Host "  removed $d"
         } catch { Fail "removing ${d}: $_" }
     } else {
-        Write-Host "  kept $d (pass -Logs to delete it)"
+        $note = if (Test-Path (Join-Path $d "jdups.conf")) { " and jdups.conf" } else { "" }
+        Write-Host "  kept $d (logs$note; pass -Logs to delete it)"
     }
 }
 
