@@ -49,7 +49,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_SNAPSHOT: u32 = WM_APP + 2;
 /// `--balloon`, forwarded to whichever instance already owns the icon.
 const WM_TEST_BALLOON: u32 = WM_APP + 3;
-/// Repaints the icon once a second, and only while a shutdown is pending.
+/// Drives the countdown while a shutdown is pending, and only then.
 const TIMER_COUNTDOWN: usize = 1;
 
 /// `WM_USER`-based notification-icon events windows-sys doesn't surface.
@@ -86,12 +86,20 @@ struct App {
     /// `GetTickCount64` at which the shutdown lands, while one is pending.
     ///
     /// Held as a deadline rather than as a remaining count so the icon can tick
-    /// once a second off a local timer. The agent publishes every couple of
-    /// seconds at best, and a countdown that reads straight from the file would
-    /// jump 60, 57, 55 -- which loses the one thing that makes the digits
-    /// legible as seconds, that they move one at a time. Each publish re-syncs
-    /// this, so local drift cannot accumulate.
+    /// off a local timer. The agent publishes whole seconds, several times a
+    /// second, and a countdown that reads straight from the file would jump
+    /// around -- losing the one thing that makes the digits legible as seconds,
+    /// that they move one at a time.
+    ///
+    /// **Latched, not re-derived.** Recomputing this on every publish treats a
+    /// value the agent produced most of a second ago as if it were current, so
+    /// the deadline slides forward and back and the display skips and repeats.
+    /// It is re-synced only on a disagreement too large to be the quantisation
+    /// of a whole-second field. See `check_agent`.
     pending_until: Option<u64>,
+    /// The last countdown value actually painted, so the timer can fire often
+    /// without repainting the icon four times a second.
+    last_countdown_shown: Option<u64>,
     /// Whether the agent that published the pending shutdown can actually act.
     /// The menu and the notification have to say "would" rather than "will"
     /// while it cannot, or a dry run reads as an emergency.
@@ -315,6 +323,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             reported_missing: false,
             agent_seq: None,
             pending_until: None,
+            last_countdown_shown: None,
             agent_armed: false,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
@@ -566,8 +575,25 @@ unsafe fn check_agent(app: *mut App) {
 
     // The countdown first, and independently of the announcement. These are
     // different jobs: the notification fires once, the icon has to keep moving.
+    // The countdown first, and independently of the announcement. These are
+    // different jobs: the notification fires once, the icon has to keep moving.
+    //
+    // **The deadline is latched, not re-derived.** The agent publishes whole
+    // seconds several times a second, so recomputing `now + n` on every read
+    // treats a value computed most of a second ago as if it were fresh, and the
+    // countdown lurches forward and back while the local timer also ticks. That
+    // is the "jumps over numbers" glitch. Sync once on entry, then only when the
+    // published value has drifted far enough to be a real disagreement rather
+    // than the quantisation of a whole-second field.
+    const DRIFT_TOLERANCE_MS: i64 = 2_000;
     let until = match (st.phase, st.seconds_left) {
-        (Phase::Pending, Some(n)) => Some(unsafe { GetTickCount64() } + n * 1000),
+        (Phase::Pending, Some(n)) => {
+            let fresh = unsafe { GetTickCount64() } + n * 1000;
+            match unsafe { (*app).pending_until } {
+                Some(held) if (held as i64 - fresh as i64).abs() <= DRIFT_TOLERANCE_MS => Some(held),
+                _ => Some(fresh),
+            }
+        }
         _ => None,
     };
     unsafe { (*app).agent_armed = st.armed };
@@ -638,7 +664,8 @@ unsafe fn set_pending(app: *mut App, until: Option<u64>) {
     }
     let hwnd = unsafe { (*app).hwnd };
     if until.is_some() {
-        unsafe { SetTimer(hwnd, TIMER_COUNTDOWN, 1000, None) };
+        unsafe { (*app).last_countdown_shown = None };
+        unsafe { SetTimer(hwnd, TIMER_COUNTDOWN, 250, None) };
     } else {
         unsafe { KillTimer(hwnd, TIMER_COUNTDOWN) };
         // Back to whatever the device says, at once, rather than at the next
@@ -1049,7 +1076,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_TIMER if wp == TIMER_COUNTDOWN => {
-            unsafe { refresh(app) };
+            // Fires four times a second so the digit changes promptly when it
+            // should, but repaints only when it actually differs. A one-second
+            // timer lands wherever it lands relative to the real boundary, which
+            // is the other half of the countdown looking uneven.
+            let now = unsafe { pending_seconds(app) };
+            if now != unsafe { (*app).last_countdown_shown } {
+                unsafe { (*app).last_countdown_shown = now };
+                unsafe { refresh(app) };
+            }
             0
         }
         WM_TEST_BALLOON => {
