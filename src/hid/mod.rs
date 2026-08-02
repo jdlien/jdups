@@ -59,6 +59,7 @@ pub trait Ups {
             last_transfer: f(report::LAST_TRANSFER)
                 .as_deref()
                 .and_then(decode::last_transfer),
+            alarm: f(report::ALARM).and_then(|b| b.get(1).copied()),
             shutdown_delay: f(report::DELAY_BEFORE_SHUTDOWN)
                 .as_deref()
                 .and_then(decode::delay_before_shutdown),

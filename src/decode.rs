@@ -44,6 +44,12 @@ pub mod report {
     /// `APC_SHUTDOWN_COUNTDOWN` for the one that actually works on this unit.
     pub const DELAY_BEFORE_SHUTDOWN: u8 = 21;
 
+    /// AudibleAlarmControl (`84:5A`), 1..3. Also mirrored on 120.
+    ///
+    /// Writable, verified on the hardware: 1 -> 2 -> 1 round-tripped with
+    /// readback on both mirrors. This is what the tray's alarm toggle drives.
+    pub const ALARM: u8 = 24;
+
     /// APC vendor `FF86:7C`, 0..1. Set while a countdown is armed.
     ///
     /// Read 1 for the whole of the observed shutdown and 0 either side of it.
@@ -64,6 +70,11 @@ pub mod report {
     /// **is** a shutdown delay, just APC's own.
     pub const APC_SHUTDOWN_COUNTDOWN: u8 = 65;
 }
+
+/// `AudibleAlarmControl` values, which are a 1-based enum rather than a flag.
+pub const ALARM_DISABLED: u8 = 1;
+pub const ALARM_ENABLED: u8 = 2;
+pub const ALARM_MUTED: u8 = 3;
 
 /// HID usage pages this device speaks.
 pub const PAGE_POWER: u16 = 0x84;

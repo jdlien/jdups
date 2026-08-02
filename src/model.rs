@@ -20,6 +20,8 @@ pub struct Reading {
     pub battery_installed: Option<(i32, u32, u32)>,
     pub last_transfer: Option<u8>,
     pub shutdown_delay: Option<i16>,
+    /// `AudibleAlarmControl`: 1 disabled, 2 enabled, 3 muted. `None` until read.
+    pub alarm: Option<u8>,
     pub status: PresentStatus,
     /// Whether `status` was actually read, as opposed to defaulted. A defaulted
     /// `PresentStatus` has `ac_present: false`, which reads as "on battery" —

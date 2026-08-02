@@ -11,7 +11,7 @@
 //! discarded during teardown; letting the UI read shared state instead has no
 //! ownership question to get wrong.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -37,6 +37,13 @@ const RETRY_MAX: Duration = Duration::from_secs(15);
 pub struct Monitor {
     snapshot: Arc<Mutex<Snapshot>>,
     stop: Arc<AtomicBool>,
+    /// A requested `AudibleAlarmControl` value, or 0 for "nothing asked".
+    ///
+    /// The UI must not touch HID -- see the module note -- so the alarm toggle
+    /// is a request left here for the thread that owns the handle. A menu that
+    /// could block on a wedged device would be exactly the bug the thread
+    /// exists to prevent, and this is the only writable thing the UI offers.
+    alarm_request: Arc<AtomicU8>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -50,16 +57,28 @@ impl Monitor {
         let target = hwnd as usize;
         let snap = Arc::clone(&snapshot);
         let flag = Arc::clone(&stop);
+        let alarm_request = Arc::new(AtomicU8::new(0));
+        let alarm = Arc::clone(&alarm_request);
 
         let handle = std::thread::spawn(move || {
-            run(target, msg, serial, snap, flag);
+            run(target, msg, serial, snap, flag, alarm);
         });
 
         Monitor {
             snapshot,
             stop,
+            alarm_request,
             handle: Some(handle),
         }
+    }
+
+    /// Ask the device thread to set the audible alarm. Returns immediately.
+    ///
+    /// The result shows up in the next snapshot as `reading.alarm`, read back
+    /// from the device rather than assumed -- so the menu reflects what the UPS
+    /// actually holds, not what it was told.
+    pub fn set_alarm(&self, value: u8) {
+        self.alarm_request.store(value, Ordering::SeqCst);
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -88,6 +107,7 @@ fn run(
     serial: Option<String>,
     snapshot: Arc<Mutex<Snapshot>>,
     stop: Arc<AtomicBool>,
+    alarm_request: Arc<AtomicU8>,
 ) {
     let mut device: Option<hid::raw::Device> = None;
     let mut backoff = RETRY_MIN;
@@ -141,6 +161,26 @@ fn run(
                 smoother.clear();
                 publish(&snapshot, target, msg, &reading, false, Some(e.to_string()), None, None);
                 continue;
+            }
+        }
+
+        // --- an alarm change the UI asked for ------------------------------
+        // Serviced here, on the thread that owns the handle, so a wedged device
+        // stalls this loop and not the menu. `set_feature` waits for the write
+        // to become visible before returning -- the device takes ~30 ms to
+        // commit and an immediate read gives the old value -- so what lands in
+        // `reading.alarm` is what the UPS actually holds.
+        let wanted = alarm_request.swap(0, Ordering::SeqCst);
+        if wanted != 0 {
+            match dev.set_feature(report::ALARM, &[wanted]) {
+                Ok(back) => reading.alarm = back.get(1).copied(),
+                // Left as it was, so the menu keeps showing the truth rather
+                // than the request. There is nowhere useful to report this: the
+                // tick that matters is the one in the menu.
+                Err(_) => reading.alarm = dev
+                    .feature(report::ALARM)
+                    .ok()
+                    .and_then(|b| b.get(1).copied()),
             }
         }
 
@@ -227,6 +267,9 @@ fn sweep(dev: &hid::raw::Device, reading: &mut Reading) {
         if let Some(b) = f(report::MANUFACTURE_DATE) {
             reading.battery_installed = decode::manufacture_date(&b);
         }
+    }
+    if let Some(b) = f(report::ALARM) {
+        reading.alarm = b.get(1).copied();
     }
     if let Some(b) = f(report::LAST_TRANSFER) {
         reading.last_transfer = decode::last_transfer(&b);

@@ -17,6 +17,7 @@ mod png;
 
 use std::time::Duration;
 
+use jdups::decode;
 use jdups::model::{Power, Snapshot};
 
 use windows_sys::Win32::Foundation::{
@@ -63,6 +64,7 @@ const ID_BATTERY: u32 = 4;
 const ID_INSTALLED: u32 = 5;
 const ID_OPEN_LOG: u32 = 6;
 const ID_EXIT: u32 = 7;
+const ID_ALARM: u32 = 8;
 
 const CF_UNICODETEXT: u32 = 13;
 
@@ -806,6 +808,19 @@ unsafe fn add_item(menu: HMENU, id: u32, text: &str, enabled: bool) {
     unsafe { InsertMenuItemW(menu, GetMenuItemCount(menu) as u32, 1, &mii) };
 }
 
+/// A menu item carrying a tick, for state rather than an action.
+unsafe fn add_check(menu: HMENU, id: u32, text: &str, checked: bool, enabled: bool) {
+    let mut label = wide(text);
+    let mut mii: MENUITEMINFOW = unsafe { core::mem::zeroed() };
+    mii.cbSize = core::mem::size_of::<MENUITEMINFOW>() as u32;
+    mii.fMask = MIIM_ID | MIIM_STRING | MIIM_STATE;
+    mii.wID = id;
+    mii.dwTypeData = label.as_mut_ptr();
+    mii.fState = if enabled { MFS_ENABLED } else { MFS_DISABLED }
+        | if checked { MFS_CHECKED } else { MFS_UNCHECKED };
+    unsafe { InsertMenuItemW(menu, GetMenuItemCount(menu) as u32, 1, &mii) };
+}
+
 unsafe fn show_menu(app: *mut App, x: i32, y: i32) {
     let snap = match unsafe { (*app).monitor.as_ref() } {
         Some(m) => m.snapshot(),
@@ -882,6 +897,20 @@ unsafe fn show_menu(app: *mut App, x: i32, y: i32) {
             add_item(menu, ID_OPEN_LOG, "Open log", true);
             AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
         }
+        // Deliberately down here with the actions, not up among the readings.
+        // Every row above copies to the clipboard; this one changes the UPS, and
+        // reaching for a number should not be able to silence an alarm. Greyed
+        // out until the state has actually been read, so it never shows a tick
+        // that is really a guess.
+        add_check(
+            menu,
+            ID_ALARM,
+            "Audible alarm",
+            r.alarm == Some(decode::ALARM_ENABLED),
+            r.alarm.is_some(),
+        );
+        AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
+
         add_item(menu, ID_EXIT, "Exit", true);
     }
 
@@ -912,6 +941,22 @@ unsafe fn on_command(app: *mut App, id: u32, snap: &Snapshot) {
     match id {
         ID_EXIT => {
             unsafe { PostMessageW((*app).hwnd, WM_CLOSE, 0, 0) };
+        }
+        ID_ALARM => {
+            // Toggle against what the device last reported, not against a local
+            // guess: 3 (muted) is a state the UPS can enter on its own, and
+            // toggling from it should enable rather than pretend it was on.
+            let now = unsafe { (*app).monitor.as_ref() }
+                .map(|m| m.snapshot().reading.alarm)
+                .unwrap_or(None);
+            let next = if now == Some(decode::ALARM_ENABLED) {
+                decode::ALARM_DISABLED
+            } else {
+                decode::ALARM_ENABLED
+            };
+            if let Some(m) = unsafe { (*app).monitor.as_ref() } {
+                m.set_alarm(next);
+            }
         }
         ID_OPEN_LOG => {
             if let Some(p) = jdups::logfile::newest_log() {
