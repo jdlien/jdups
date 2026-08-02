@@ -183,6 +183,24 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         if last_sweep.elapsed() >= sweep_every {
             sweep(dev, &mut acc);
             last_sweep = Instant::now();
+
+            // **Polled, not just watched.** Report 33 is pushed on change, and
+            // relying on that alone meant self-tests stopped being logged
+            // entirely the moment the input stream went away -- which happens
+            // for good once Windows binds its own battery driver to the UPS.
+            // A self-test also transfers to battery briefly, so without this
+            // row the log shows an onbattery/online pair indistinguishable from
+            // a brownout, which is exactly the question the log gets opened to
+            // answer.
+            if let Some(v) = dev.feature(report::TEST).ok().as_deref().and_then(decode::test) {
+                if last_test.is_some_and(|p| p != v) {
+                    sweep(dev, &mut acc);
+                    acc.set_detail(format!("result={}", decode::test_result(v)));
+                    write(&mut acc, Event::SelfTest, opts.verbose);
+                    window_start = Instant::now();
+                }
+                last_test = Some(v);
+            }
         }
 
         // --- close the window ----------------------------------------------

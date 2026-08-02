@@ -129,6 +129,8 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut last_wake_seq: u32 = 0;
     // Whether the broken stream has already been reported.
     let mut input_reported = false;
+    // The last self-test result seen, so only a change is worth a line.
+    let mut last_test: Option<u8> = None;
 
     while !stop.load(Ordering::SeqCst) {
         // **Per field, not one bit for all of them.** A single `fresh` flag let
@@ -293,6 +295,22 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
                 status = Some(dev.status_of(&b, false));
                 status_fresh = true;
             }
+            // The self-test, which matters more than it looks. A test transfers
+            // to battery for a few seconds, so without this the log shows an
+            // "on battery" and a "back on mains" that read exactly like a
+            // brownout -- and telling those apart is the main reason anyone
+            // opens this file. Polled rather than watched, because the input
+            // stream is gone for good once Windows binds its own battery driver.
+            if let Some(v) = dev.feature(report::TEST).ok().as_deref().and_then(decode::test) {
+                match last_test {
+                    Some(prev) if prev != v => say(
+                        Level::Info,
+                        &format!("UPS self-test: {}", decode::test_result(v)),
+                    ),
+                    _ => {}
+                }
+                last_test = Some(v);
+            }
             if let Ok(b) = dev.feature(report::CHARGE_RUNTIME) {
                 if let Some(c) = decode::charge(&b) {
                     charge = Some(c);
@@ -350,6 +368,40 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         // device that goes quiet mid-outage does not let the machine doze off.
         let on_battery_now = state.on_battery();
         if on_battery_now != holding_awake {
+            // **Why did it transfer?** A self-test drops to battery for a few
+            // seconds and reads identically to a brownout otherwise, and telling
+            // those apart is the main reason anyone opens this log. Two signals,
+            // both read at the moment it happens:
+            //
+            //   report 33 = in-progress   a test is running, so this is a test
+            //   report 54                 APC's own transfer reason code
+            //
+            // The code is printed raw. Only one value has been confirmed against
+            // this hardware -- 8, for a pulled plug, seen twice -- and inventing
+            // names for the rest from a table nobody here has verified would be
+            // worse than a number somebody can look up.
+            if on_battery_now {
+                let testing = dev
+                    .feature(report::TEST)
+                    .ok()
+                    .as_deref()
+                    .and_then(decode::test)
+                    .is_some_and(|v| decode::test_result(v) == "in-progress");
+                let code = dev
+                    .feature(report::LAST_TRANSFER)
+                    .ok()
+                    .as_deref()
+                    .and_then(decode::last_transfer);
+                say(
+                    Level::Info,
+                    &match (testing, code) {
+                        (true, _) => "transferred to battery: a self-test is running".to_string(),
+                        (false, Some(8)) => "transferred to battery: reason 8 (mains lost)".into(),
+                        (false, Some(c)) => format!("transferred to battery: reason code {c}"),
+                        (false, None) => "transferred to battery: reason unreadable".into(),
+                    },
+                );
+            }
             holding_awake = on_battery_now;
             hold_awake(on_battery_now);
             say(
