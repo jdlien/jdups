@@ -56,6 +56,12 @@ const RETRY_SHUTDOWN_S: u64 = 30;
 /// well inside the 30 s staleness default, so a quick reopen keeps the
 /// readings from ever counting as stale.
 const POLL_FAILURES_TO_REOPEN: u32 = 5;
+/// How often to look at the countdown registers while on mains. On battery
+/// the watch runs every pass -- the moment it exists to catch is a few
+/// hundred milliseconds wide -- but on mains those registers change only if
+/// something external arms the UPS, and reading three of them every poll was
+/// ninety IOCTLs a minute spent confirming that nothing had.
+const COUNTDOWN_WATCH_MAINS_EVERY: Duration = Duration::from_secs(30);
 
 pub struct Options {
     pub settings: Settings,
@@ -124,6 +130,7 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
     // days-old runtime qualifying the thresholds as though it were current.
     let mut numbers_at: Option<Instant> = None;
     let mut last_countdown: Option<(Option<i16>, Option<u8>, Option<i16>)> = None;
+    let mut last_countdown_look: Option<Instant> = None;
     // When the device last actually answered. `Observation::fresh` is per-pass
     // and says nothing about health; this is what the log should report.
     let mut last_answer = Instant::now();
@@ -218,7 +225,6 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
                 continue;
             }
         }
-        let mut polled = false;
         if let Some(dev) = device.as_ref() {
         match if input_ok {
             dev.input(READ_TIMEOUT_MS)
@@ -306,7 +312,7 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         }
 
         // --- the poll -------------------------------------------------------
-        polled = last_poll.is_none_or(|t| t.elapsed() >= POLL_EVERY);
+        let polled = last_poll.is_none_or(|t| t.elapsed() >= POLL_EVERY);
         if polled {
             last_poll = Some(Instant::now());
             match dev.feature(report::PRESENT_STATUS) {
@@ -569,9 +575,13 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         // worth catching is a few hundred milliseconds wide: whoever arms the
         // UPS does it late in a shutdown sequence, and this process is being
         // torn down by that same sequence. A 2 s cadence could miss the only
-        // event the watch exists for.
-        if polled || o.on_battery {
+        // event the watch exists for. On mains the registers change only if
+        // something external arms the UPS, so a slow look suffices there.
+        let look = o.on_battery
+            || last_countdown_look.is_none_or(|t| t.elapsed() >= COUNTDOWN_WATCH_MAINS_EVERY);
+        if look {
             if let Some(dev) = device.as_ref() {
+                last_countdown_look = Some(Instant::now());
                 let now = countdown(dev);
                 if last_countdown.is_some_and(|prev| prev != now) {
                     say(Level::Act, &describe_countdown(&now));
