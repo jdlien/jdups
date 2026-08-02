@@ -63,10 +63,26 @@ Be honest about these rather than assuming they work.
   one: `Shell_NotifyIcon` controls the large body image, while the header icon
   comes from the AppUserModelID registration. Registering the ID fills the
   header; the body image is now deliberately absent.
-- **The agent has never seen an outage.** It has been run against the live UPS
-  on mains, found the device, and correctly written nothing. Every path from
-  `Warn` onward is covered by tests and by nothing else. The plug-pull below is
-  what settles it.
+- ~~The agent has never seen an outage.~~ **Proven end to end, 2026-08-01**, on
+  real hardware in dry run, with absurd thresholds so it cost 4 minutes of
+  battery:
+
+  ```
+  19:13:34  warn  on battery: 97%, 34 min left (2013 s)
+  19:13:49  ACT   decision reached: would shut down: predicted runtime below the threshold
+  19:13:49  ACT   shutting down in 70 s. Save your work.
+  19:14:59  ACT   the grace period is up: this is where it would shut down
+  19:17:33  info  back on mains: 81%, 34 min left (2031 s)
+  19:17:33  ACT   shutdown cancelled: the machine is no longer past the trigger
+  ```
+
+  Settle and debounce timed exactly, the grace period expired to the second, the
+  tray toasted and counted down in red, and the mains-return debounce held for
+  five seconds before clearing. Nothing was written to the UPS.
+
+  Two defects only a real run could find, both now fixed: the warning fired
+  three times inside one second (`now_s` is whole seconds, the loop is faster
+  than that), and the menu still read "On battery" while the icon counted down.
 - Everything in Phase 8 past the decision: the service, the transaction, the
   restart handshake.
 
@@ -82,25 +98,19 @@ Be honest about these rather than assuming they work.
    instance rather than exiting in silence, so it works without stopping the tray.
 3. The tray icon sits in the Windows 11 hidden-icon overflow after any change to
    `APP_ID`, because Explorer keys visibility on app identity. Drag it out once.
-4. **Make the agent decide, on purpose, in fifteen seconds.** Put absurd
-   thresholds in a config and pull the plug. Nothing can act on the decision, so
-   this costs a few seconds of battery and proves the whole path from device to
-   log entry:
+4. ~~Make the agent decide, on purpose.~~ Done, and worth repeating after any
+   change to the decision path. Append to `%ProgramData%\jdups\jdups.conf` from
+   an elevated shell, restart the task, pull the plug for ninety seconds:
 
    ```
    runtime_threshold_s = 3600     # always qualifies
    settle_s = 10                  # the minimum validate() allows
    debounce_s = 5                 # likewise
+   warn_before_s = 60
    ```
 
-   ```powershell
-   .\target\release\jdups-agent.exe --config .\test.conf --dir .
-   ```
-
-   Expect an `on battery:` line immediately, then an `ACT` line reading
-   `would shut down now: predicted runtime below the threshold` about fifteen
-   seconds later. If the reason or the timing is wrong, that is worth knowing
-   before anything is ever allowed to act on it.
+   **Take them out again afterwards.** `runtime_threshold_s = 3600` means any
+   loss of mains qualifies instantly, which is inert today and would not be.
 
 **Phase 8, and only in this order.** See the plan's Phase 8 for the full
 argument; the short version, with the first rung now done:
