@@ -458,14 +458,16 @@ fn flags(s: &PresentStatus) -> String {
 /// This is how the plug-pull experiment in Phase 1.5 gets read: run it into a
 /// file, pull the plug for thirty seconds, and the transitions are all here.
 fn cmd_watch(dev: &raw::Device, secs: Option<u64>) -> i32 {
-    let deadline = secs.map(|s| Instant::now() + Duration::from_secs(s));
-    match deadline {
-        Some(_) => println!("watching for {}s (Ctrl-C to stop)\n", secs.unwrap()),
+    // `checked_add`: an absurd --watch value must not panic on Instant
+    // overflow; it just watches without a deadline, which is what it asked for.
+    let deadline = secs.and_then(|s| Instant::now().checked_add(Duration::from_secs(s)));
+    match secs {
+        Some(s) => println!("watching for {s}s (Ctrl-C to stop)\n"),
         None => println!("watching (Ctrl-C to stop)\n"),
     }
     let start = Instant::now();
     let mut count = 0u64;
-    let mut last_sweep = Instant::now() - Duration::from_secs(10);
+    let mut last_sweep: Option<Instant> = None;
 
     loop {
         if let Some(d) = deadline {
@@ -478,8 +480,8 @@ fn cmd_watch(dev: &raw::Device, secs: Option<u64>) -> i32 {
         // input stream — so a capture built from input reports alone cannot
         // answer the question the plug-pull exists to answer: which voltage
         // report is which once the unit is actually on battery.
-        if last_sweep.elapsed() >= Duration::from_secs(2) {
-            last_sweep = Instant::now();
+        if last_sweep.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+            last_sweep = Some(Instant::now());
             let f = |id: u8| dev.feature(id).ok();
             let bv = f(report::BATTERY_VOLTS)
                 .as_deref()

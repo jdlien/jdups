@@ -47,7 +47,10 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let sweep_every = SWEEP_EVERY.min(opts.interval / 4).max(Duration::from_secs(1));
 
     let mut window_start = Instant::now();
-    let mut last_sweep = Instant::now() - sweep_every;
+    // `None` means "due now". Never `Instant::now() - sweep_every`: `Instant`
+    // on Windows counts from boot, and subtracting more than the machine has
+    // been up panics -- the boot-started sampler runs in exactly that window.
+    let mut last_sweep: Option<Instant> = None;
 
     let mut last_status: Option<PresentStatus> = None;
     let mut last_test: Option<u8> = None;
@@ -180,9 +183,9 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
 
         // --- the feature-only fields ---------------------------------------
-        if last_sweep.elapsed() >= sweep_every {
+        if last_sweep.is_none_or(|t| t.elapsed() >= sweep_every) {
             sweep(dev, &mut acc);
-            last_sweep = Instant::now();
+            last_sweep = Some(Instant::now());
 
             // **Polled, not just watched.** Report 33 is pushed on change, and
             // relying on that alone meant self-tests stopped being logged

@@ -100,7 +100,10 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut backoff = RETRY_MIN;
     let mut device_ok = false;
     let mut reconciled = false;
-    let mut last_poll = Instant::now() - POLL_EVERY;
+    // `None` means "due now". Never `Instant::now() - POLL_EVERY`: `Instant` on
+    // Windows counts from boot, and subtracting more than the machine has been
+    // up panics -- which is exactly the state a boot-started agent runs in.
+    let mut last_poll: Option<Instant> = None;
 
     // The last thing each field was seen to be. Held across ticks so a poll
     // that fails does not erase what is known; `fresh` is what says whether to
@@ -116,7 +119,7 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     // monotonic instant it was made at.
     let mut committed_at: Option<u64> = None;
     let mut published = Status::default();
-    let mut last_publish = Instant::now() - Duration::from_secs(60);
+    let mut last_publish: Option<Instant> = None;
     let mut holding_awake = false;
     // Whether the input stream is usable. It can fail independently of the
     // device; see the error arm below.
@@ -288,9 +291,9 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         }
 
         // --- the poll -------------------------------------------------------
-        let polled = last_poll.elapsed() >= POLL_EVERY;
+        let polled = last_poll.is_none_or(|t| t.elapsed() >= POLL_EVERY);
         if polled {
-            last_poll = Instant::now();
+            last_poll = Some(Instant::now());
             if let Ok(b) = dev.feature(report::PRESENT_STATUS) {
                 status = Some(dev.status_of(&b, false));
                 status_fresh = true;
@@ -620,7 +623,7 @@ fn phase_of(action: jdups::policy::Action, o: &Observation) -> Phase {
 fn publish(
     dir: &std::path::Path,
     published: &mut Status,
-    last: &mut Instant,
+    last: &mut Option<Instant>,
     armed: bool,
     phase: Phase,
     seconds_left: Option<u64>,
@@ -641,7 +644,7 @@ fn publish(
         || published.reason != reason
         || event != Event::None
         || phase == Phase::Pending;
-    if !changed && last.elapsed() < Duration::from_secs(5) {
+    if !changed && last.is_some_and(|l| l.elapsed() < Duration::from_secs(5)) {
         return;
     }
 
@@ -657,7 +660,7 @@ fn publish(
         published.seq += 1;
         published.event = event;
     }
-    *last = Instant::now();
+    *last = Some(Instant::now());
 
     if let Err(e) = status::write(dir, published) {
         eprintln!("jdups-agent: could not publish status: {e}");
