@@ -36,6 +36,8 @@ const READ_TIMEOUT_MS: u32 = 500;
 const POLL_EVERY: Duration = Duration::from_secs(2);
 const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(30);
+/// How often to try to get a failed input stream back.
+const INPUT_RETRY_EVERY: Duration = Duration::from_secs(60);
 
 pub struct Options {
     pub settings: Settings,
@@ -102,6 +104,10 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
     let mut published = Status::default();
     let mut last_publish = Instant::now() - Duration::from_secs(60);
     let mut holding_awake = false;
+    // Whether the input stream is usable. It can fail independently of the
+    // device; see the error arm below.
+    let mut input_ok = true;
+    let mut last_input_retry = Instant::now();
 
     while !stop.load(Ordering::SeqCst) {
         let mut fresh = false;
@@ -156,7 +162,25 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
         let dev = device.as_ref().unwrap();
 
         // --- the input stream ---------------------------------------------
-        match dev.input(READ_TIMEOUT_MS) {
+        // Retried on a slow cadence: a stream that came back is worth having,
+        // and reopening is the only thing that has ever restored one.
+        if !input_ok && last_input_retry.elapsed() >= INPUT_RETRY_EVERY {
+            last_input_retry = Instant::now();
+            if let Ok(d) = hid::open(opts.serial.as_deref()) {
+                device = Some(d);
+                input_ok = true;
+                say(Level::Info, "retrying the input stream");
+                continue;
+            }
+        }
+        match if input_ok {
+            dev.input(READ_TIMEOUT_MS)
+        } else {
+            // Nothing to wait on, so pace the loop off the poll instead of
+            // spinning through it as fast as the CPU allows.
+            sleep_interruptibly(Duration::from_millis(READ_TIMEOUT_MS as u64), &stop);
+            Ok(None)
+        } {
             Ok(Some(buf)) => match buf.first().copied() {
                 Some(report::CHARGE_RUNTIME) => {
                     if let Some(c) = decode::charge(&buf) {
@@ -179,9 +203,27 @@ pub fn run(opts: Options, stop: Arc<AtomicBool>) -> i32 {
             },
             Ok(None) => {}
             Err(e) => {
-                say(Level::Warn, &format!("read failed: {e}"));
-                device = None;
-                continue;
+                // **Do not throw the device away.** The input stream and the
+                // device are different things, and they come apart: this UPS
+                // stops serving input reports across an S3 resume, and again
+                // after a re-enumeration, while feature reads keep working
+                // perfectly. Dropping the handle here reopened it -- which
+                // succeeds, because opening is fine -- and then failed on the
+                // very next read, forever. Measured at ~85 log lines a second,
+                // indefinitely, from a SYSTEM process writing to disk.
+                //
+                // So: stop reading the stream, keep the handle, and carry on
+                // polling features. Everything the decision needs comes from
+                // the poll; the stream only makes ShutdownImminent arrive
+                // sooner. Degrading to a 2 s latency beats spinning.
+                if input_ok {
+                    input_ok = false;
+                    say(
+                        Level::Warn,
+                        &format!("input stream failed ({e}); falling back to polling every {} s", POLL_EVERY.as_secs()),
+                    );
+                }
+                last_input_retry = Instant::now();
             }
         }
 

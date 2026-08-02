@@ -33,6 +33,8 @@ const SWEEP_EVERY: Duration = Duration::from_secs(5);
 /// promptly rather than after an ever-growing wait.
 const RETRY_MIN: Duration = Duration::from_secs(1);
 const RETRY_MAX: Duration = Duration::from_secs(15);
+/// How often to try to get a failed input stream back.
+const INPUT_RETRY_EVERY: Duration = Duration::from_secs(60);
 
 pub struct Monitor {
     snapshot: Arc<Mutex<Snapshot>>,
@@ -115,6 +117,9 @@ fn run(
     let mut last_stream: Option<Instant> = None;
     let mut reading = Reading::default();
     let mut last_status: Option<PresentStatus> = None;
+    // The input stream can fail while the device stays healthy. See below.
+    let mut input_ok = true;
+    let mut last_input_retry = Instant::now();
     let mut smoother = Smoother::new();
 
     while !stop.load(Ordering::SeqCst) {
@@ -147,20 +152,43 @@ fn run(
         };
 
         // --- the input stream ---------------------------------------------
-        match dev.input(READ_TIMEOUT_MS) {
+        if !input_ok && last_input_retry.elapsed() >= INPUT_RETRY_EVERY {
+            last_input_retry = Instant::now();
+            if let Ok(d) = hid::open(serial.as_deref()) {
+                device = Some(d);
+                input_ok = true;
+                continue;
+            }
+        }
+        match if input_ok {
+            dev.input(READ_TIMEOUT_MS)
+        } else {
+            // Pace off the read timeout rather than spinning with nothing to
+            // wait on.
+            std::thread::sleep(Duration::from_millis(READ_TIMEOUT_MS as u64));
+            Ok(None)
+        } {
             Ok(Some(buf)) => {
                 last_stream = Some(Instant::now());
                 apply_input(dev, &buf, &mut reading, &mut smoother);
             }
             Ok(None) => {} // timeout; loop and re-check the stop flag
-            Err(e) => {
-                // Lost the device. Clear per-field state so nothing survives
-                // the gap looking current.
-                device = None;
-                reading = Reading::default();
-                smoother.clear();
-                publish(&snapshot, target, msg, &reading, false, Some(e.to_string()), None, None);
-                continue;
+            Err(_) => {
+                // **A failed input stream is not a lost device.** They come
+                // apart on this hardware: after an S3 resume, and after a USB
+                // re-enumeration, the stream stops while feature reads keep
+                // working. Discarding the handle here reopened it -- which
+                // succeeds -- and failed on the next read immediately, so the
+                // thread spun as fast as the CPU allowed, publishing an error
+                // over a device that was answering every feature read.
+                //
+                // Stop reading the stream and let the sweep carry the readout.
+                // The menu keeps its numbers; only the sub-second reaction to a
+                // transfer is lost, and the sweep is 5 s.
+                if input_ok {
+                    input_ok = false;
+                    last_input_retry = Instant::now();
+                }
             }
         }
 
