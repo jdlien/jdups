@@ -1206,7 +1206,7 @@ fn eta_line(armed: bool, eta_s: u64, why: &str) -> String {
         format!("in ~{} min", (eta_s + 30) / 60)
     };
     if armed {
-        format!("Auto shutdown {when}, {why}")
+        format!("Shutdown {when}, {why}")
     } else {
         format!("Would shut down {when}, {why} (dry run)")
     }
@@ -1403,7 +1403,7 @@ mod tests {
     fn the_eta_line_reads_like_a_sentence_and_rounds_to_minutes() {
         assert_eq!(
             eta_line(true, 1720, "at 5 min remaining"),
-            "Auto shutdown in ~29 min, at 5 min remaining"
+            "Shutdown in ~29 min, at 5 min remaining"
         );
         assert_eq!(
             eta_line(false, 1720, "at 5 min remaining"),
@@ -1412,7 +1412,7 @@ mod tests {
         // Under 90 seconds the number would be noise; the words carry it.
         assert_eq!(
             eta_line(true, 45, "at the 30 min on-battery limit"),
-            "Auto shutdown in about a minute, at the 30 min on-battery limit"
+            "Shutdown in about a minute, at the 30 min on-battery limit"
         );
         // Rounds, never truncates: 150 s is closer to 3 min than 2.
         assert!(eta_line(true, 150, "x").contains("~3 min"));
