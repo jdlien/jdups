@@ -30,9 +30,13 @@ on_pending_cmd = C:\bin\jdrgb.exe red
 on_mains_cmd   = C:\bin\jdrgb.exe normal
 ```
 
-(The "restore whatever it was before" version wants jdrgb to remember its own
-last setting -- that is a jdrgb feature, noted there, not a jdups one. Until it
-exists, `on_mains_cmd` sets a fixed scheme.)
+(The "restore whatever it was before" version wanted jdrgb to remember its own
+last setting, and as of 2026-08-03 it does: `--stash` saves the current colour
+on the way into an alert and a `restore` subcommand puts it back. So
+`on_battery_cmd` stashes-and-sets, `on_mains_cmd` restores, and jdups never
+learned a thing about lighting -- each tool grew its own half and the config
+file is the only place they meet. In use, live, on the machine this was built
+for.)
 
 ## The decisions that matter
 
