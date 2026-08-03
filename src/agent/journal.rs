@@ -175,7 +175,7 @@ fn numbers(o: &Observation, stale: bool) -> String {
 }
 
 /// Seconds as something a human reads without arithmetic.
-fn duration(s: u64) -> String {
+pub(crate) fn duration(s: u64) -> String {
     if s < 90 {
         return format!("{s} s");
     }

@@ -87,6 +87,15 @@ impl Why {
     }
 }
 
+/// Which clock produced a shutdown estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EtaRoute {
+    /// Runtime draining toward the threshold, plus the debounce still owed.
+    Runtime,
+    /// The on-battery time limit.
+    Backstop,
+}
+
 /// What the service learned about a resume since the last observation.
 ///
 /// Only a service is ever told. A console agent and a scheduled task always
@@ -297,6 +306,40 @@ impl State {
     /// the outage" is the sentence that makes a dry run worth reading.
     pub fn on_battery_for(&self, now_s: u64) -> Option<u64> {
         self.outage_since.map(|t| now_s.saturating_sub(t))
+    }
+
+    /// Roughly how long until this state first says Shutdown, and by which
+    /// clock. `None` off battery.
+    ///
+    /// **For display, never for the decision.** Runtime ticks down at roughly
+    /// real time, so runtime minus threshold is itself a time estimate; add
+    /// the debounce not yet served, floor it at what remains of the settle
+    /// window, and let the backstop's hard deadline beat it when it is sooner.
+    /// The charge floor is deliberately absent: percent decay cannot be
+    /// extrapolated honestly, so the estimate can only ever be early through
+    /// the routes it does model, and the caller should say "about".
+    pub fn shutdown_eta(&self, o: &Observation, cfg: &Config) -> Option<(u64, EtaRoute)> {
+        let outage_since = self.outage_since?;
+        let on_battery_for = o.now_s.saturating_sub(outage_since);
+
+        let backstop = cfg.max_on_battery_s.saturating_sub(on_battery_for);
+
+        let runtime = o.runtime_s.map(|r| {
+            let to_cross = u64::from(r.saturating_sub(cfg.runtime_threshold_s));
+            let debounce_owed = match self.qualifying_since {
+                Some(qs) if to_cross == 0 => {
+                    cfg.debounce_s.saturating_sub(o.now_s.saturating_sub(qs))
+                }
+                _ => cfg.debounce_s,
+            };
+            let settle_floor = cfg.settle_s.saturating_sub(on_battery_for);
+            (to_cross + debounce_owed).max(settle_floor)
+        });
+
+        Some(match runtime {
+            Some(r) if r <= backstop => (r, EtaRoute::Runtime),
+            _ => (backstop, EtaRoute::Backstop),
+        })
     }
 
     /// Fold in one observation and say what to do.
@@ -779,6 +822,94 @@ mod tests {
     #[test]
     fn an_unbounded_backstop_is_not_a_backstop() {
         assert!(Config { max_on_battery_s: u64::MAX, ..cfg() }.validate().is_err());
+    }
+
+    /// The estimate the tray shows under its status line. Runtime ticks down
+    /// at roughly real time, so runtime minus threshold *is* a time estimate,
+    /// plus the debounce still owed; the backstop is a hard deadline that can
+    /// beat it. Approximate on purpose and never load-bearing: nothing acts on
+    /// it, and the charge floor can still fire first unannounced.
+    #[test]
+    fn the_eta_names_the_sooner_route() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        let o = battery(1, 90, 2000);
+        s.observe(&o, &c);
+        // Runtime 2000 s against a 300 s threshold: 1700 s to cross plus the
+        // debounce, well inside the 1800 s backstop.
+        let (eta, route) = s.shutdown_eta(&o, &c).expect("no eta during an outage");
+        assert_eq!(route, EtaRoute::Runtime);
+        assert_eq!(eta, 1700 + c.debounce_s);
+
+        // A runtime that outlasts the backstop hands the estimate to it.
+        let o = battery(2, 95, 3000);
+        s.observe(&o, &c);
+        let (eta, route) = s.shutdown_eta(&o, &c).unwrap();
+        assert_eq!(route, EtaRoute::Backstop);
+        assert_eq!(eta, c.max_on_battery_s - 1);
+    }
+
+    #[test]
+    fn the_eta_owes_only_the_debounce_still_unserved() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        for t in 1..=1 + c.settle_s {
+            s.observe(&battery(t, 90, 2000), &c);
+        }
+        // Past the settle window and already below the threshold: the clock
+        // that remains is the debounce, and it is part-served.
+        let t0 = 2 + c.settle_s;
+        s.observe(&battery(t0, 80, 200), &c);
+        let half = t0 + c.debounce_s / 2;
+        let o = battery(half, 80, 200);
+        s.observe(&o, &c);
+        let (eta, route) = s.shutdown_eta(&o, &c).unwrap();
+        assert_eq!(route, EtaRoute::Runtime);
+        assert_eq!(eta, c.debounce_s - c.debounce_s / 2, "served debounce not credited");
+    }
+
+    #[test]
+    fn there_is_no_eta_on_mains() {
+        let c = cfg();
+        let mut s = State::new();
+        let o = mains(0);
+        s.observe(&o, &c);
+        assert_eq!(s.shutdown_eta(&o, &c), None);
+    }
+
+    /// With no runtime reading the backstop is the only clock left, which is
+    /// also what the policy itself does.
+    #[test]
+    fn a_missing_runtime_rides_the_backstop() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        let o = Observation { runtime_s: None, ..battery(1, 90, 0) };
+        s.observe(&o, &c);
+        let (eta, route) = s.shutdown_eta(&o, &c).unwrap();
+        assert_eq!(route, EtaRoute::Backstop);
+        // Latched at this very observation, so the whole limit remains.
+        assert_eq!(eta, c.max_on_battery_s);
+    }
+
+    /// The settle window floors the estimate: nothing fires inside it, however
+    /// low the numbers already are, so the estimate must not promise sooner.
+    #[test]
+    fn the_settle_window_floors_the_eta() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        // Crashed straight through the threshold at the moment of transfer.
+        let o = battery(1, 10, 60);
+        s.observe(&o, &c);
+        let (eta, _) = s.shutdown_eta(&o, &c).unwrap();
+        assert!(
+            eta >= c.settle_s,
+            "promised {eta} s inside a {} s settle window",
+            c.settle_s
+        );
     }
 
     /// Found by review. `shutdown_on_wake` used to live outside the policy as a

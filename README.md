@@ -48,8 +48,10 @@ Some of the shape behind those numbers:
   power is coming from, and whose digits are the minutes remaining. The menu
   carries the full readout and copies any row to the clipboard, toggles the
   UPS's audible alarm, opens the log and the config (elevating the editor only
-  when saving actually needs it), and counts a pending shutdown down in red.
-  In 1.7 MB, and it respects dark mode.
+  when saving actually needs it), counts a pending shutdown down in red, and
+  during an outage says when the automatic shutdown is expected -- "Auto
+  shutdown in ~28 min, at 5 min remaining" -- straight from the agent's own
+  estimate. In 1.7 MB, and it respects dark mode.
 - 1.3 % of a core, continuously, is not free either — it is roughly what jdups
   costs *forty times over*, to poll the same device over the same USB cable.
   And CPU percent undersells the difference for an always-on background tool:

@@ -90,6 +90,13 @@ pub struct Status {
     pub seconds_left: Option<u64>,
     /// Why, in the words `policy::Why` uses.
     pub reason: Option<String>,
+    /// Roughly how long until the agent decides to shut down, while `phase` is
+    /// `OnBattery`. An estimate for display, from `policy::shutdown_eta`;
+    /// nothing acts on it.
+    pub eta_s: Option<u64>,
+    /// What ends the estimate, as prose the agent composed: it knows the
+    /// operative thresholds and the tray deliberately does not.
+    pub eta_why: Option<String>,
     /// Bumped whenever `event` is set to something worth announcing.
     ///
     /// The tray remembers the last one it acted on. Without a sequence number
@@ -108,6 +115,8 @@ impl Default for Status {
             phase: Phase::Idle,
             seconds_left: None,
             reason: None,
+            eta_s: None,
+            eta_why: None,
             seq: 0,
             event: Event::None,
         }
@@ -129,6 +138,12 @@ impl Status {
         }
         if let Some(r) = &self.reason {
             s.push_str(&format!("reason = {r}\n"));
+        }
+        if let Some(n) = self.eta_s {
+            s.push_str(&format!("eta_s = {n}\n"));
+        }
+        if let Some(w) = &self.eta_why {
+            s.push_str(&format!("eta_why = {w}\n"));
         }
         // The terminator, and it is load-bearing. See `parse`.
         s.push_str("end\n");
@@ -184,6 +199,8 @@ impl Status {
                 "event" => st.event = Event::parse(v)?,
                 "seconds_left" => st.seconds_left = Some(v.parse().ok()?),
                 "reason" => st.reason = Some(v.to_string()),
+                "eta_s" => st.eta_s = Some(v.parse().ok()?),
+                "eta_why" => st.eta_why = Some(v.to_string()),
                 // Unknown keys stay ignored: the two binaries can be different
                 // versions mid-upgrade, and a tray that refused a newer file
                 // would disable the warning without saying so.
@@ -313,6 +330,8 @@ mod tests {
             phase: Phase::Pending,
             seconds_left: Some(60),
             reason: Some("predicted runtime below the threshold".into()),
+            eta_s: Some(1720),
+            eta_why: Some("at 5 min remaining".into()),
             seq: 7,
             event: Event::Pending,
         }
@@ -386,7 +405,7 @@ mod tests {
     /// dropping a shutdown warning in silence.
     #[test]
     fn a_corrupt_known_field_rejects_the_record() {
-        for bad in ["phase = wat", "event = wat", "seq = wat", "seconds_left = wat"] {
+        for bad in ["phase = wat", "event = wat", "seq = wat", "seconds_left = wat", "eta_s = wat"] {
             let text = sample().to_text().replace("end
 ", &format!("{bad}
 end

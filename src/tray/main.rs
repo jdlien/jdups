@@ -120,6 +120,9 @@ struct App {
     saw_outage: bool,
     /// Stat-before-parse reader for the agent's status file, polled at 1 Hz.
     agent_reader: jdups::status::Reader,
+    /// The agent's shutdown estimate while on battery, ready to render: the
+    /// seconds and the prose the agent composed for what ends them.
+    agent_eta: Option<(u64, String)>,
     /// The power-event hook commands and their change detector. The tray is
     /// the only executor; see docs/power-hooks.md for why the agent must not be.
     hooks: hooks::Hooks,
@@ -357,6 +360,7 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             icon_added: false,
             saw_outage: false,
             agent_reader: jdups::status::Reader::new(),
+            agent_eta: None,
             hooks: hooks::Hooks::default(),
             hook_cmds,
             agent_armed: false,
@@ -640,9 +644,16 @@ unsafe fn check_agent(app: *mut App) {
     use jdups::status::{Event, Phase};
 
     let Some(st) = (unsafe { &mut (*app).agent_reader }).read() else {
+        unsafe { (*app).agent_eta = None };
         unsafe { set_pending(app, None) };
         return;
     };
+    unsafe {
+        (*app).agent_eta = match (st.eta_s, st.eta_why.clone()) {
+            (Some(s), Some(w)) => Some((s, w)),
+            _ => None,
+        };
+    }
 
     // The countdown first, and independently of the announcement. These are
     // different jobs: the notification fires once, the icon has to keep moving.
@@ -938,6 +949,14 @@ unsafe fn show_menu(app: *mut App, x: i32, y: i32) {
             add_item(menu, ID_STATUS, &line, true);
         }
         add_item(menu, ID_STATUS, &snap.status_line(), true);
+        // What is about to happen to the machine, while it still is not:
+        // during an outage, the agent's own estimate of when it will act. Gone
+        // once the countdown starts -- the pending line above says the rest.
+        if pending_seconds(app).is_none() {
+            if let Some((secs, why)) = (*app).agent_eta.as_ref() {
+                add_item(menu, ID_STATUS, &eta_line((*app).agent_armed, *secs, why), true);
+            }
+        }
         AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
 
         // Every data row is enabled and copies the whole readout. A disabled
@@ -1174,6 +1193,25 @@ unsafe fn open_as_text(path: &std::path::Path, elevated: bool) {
     };
 }
 
+/// The menu line under the status row during an outage.
+///
+/// Rounded to minutes, and "~" earned three ways: the runtime reading jitters,
+/// the charge floor is not modelled and can fire sooner, and the settle window
+/// can defer the start. The prose after the comma is the agent's own, composed
+/// where the operative thresholds are known.
+fn eta_line(armed: bool, eta_s: u64, why: &str) -> String {
+    let when = if eta_s < 90 {
+        "in about a minute".to_string()
+    } else {
+        format!("in ~{} min", (eta_s + 30) / 60)
+    };
+    if armed {
+        format!("Auto shutdown {when}, {why}")
+    } else {
+        format!("Would shut down {when}, {why} (dry run)")
+    }
+}
+
 /// Whether saving the config will take an elevated editor.
 ///
 /// Decided by asking the filesystem, not by guessing the install shape:
@@ -1357,6 +1395,28 @@ mod tests {
     use super::*;
     use jdups::decode::{PresentStatus, PAGE_BATTERY};
     use jdups::model::Reading;
+
+    /// The estimate reads as one sentence about the machine's near future, in
+    /// minutes because the seconds jitter, and it never claims precision it
+    /// does not have.
+    #[test]
+    fn the_eta_line_reads_like_a_sentence_and_rounds_to_minutes() {
+        assert_eq!(
+            eta_line(true, 1720, "at 5 min remaining"),
+            "Auto shutdown in ~29 min, at 5 min remaining"
+        );
+        assert_eq!(
+            eta_line(false, 1720, "at 5 min remaining"),
+            "Would shut down in ~29 min, at 5 min remaining (dry run)"
+        );
+        // Under 90 seconds the number would be noise; the words carry it.
+        assert_eq!(
+            eta_line(true, 45, "at the 30 min on-battery limit"),
+            "Auto shutdown in about a minute, at the 30 min on-battery limit"
+        );
+        // Rounds, never truncates: 150 s is closer to 3 min than 2.
+        assert!(eta_line(true, 150, "x").contains("~3 min"));
+    }
 
     /// A writable config never prompts for elevation, and probing a missing
     /// one leaves nothing behind. The denied case needs an ACL to simulate,

@@ -512,7 +512,7 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
                         // countdown that had already run out.
                         publish(
                             &opts.dir, &mut published, &mut last_publish, true,
-                            Phase::Pending, Some(0), action, Event::Shutdown,
+                            Phase::Pending, Some(0), None, action, Event::Shutdown,
                         );
                         // Announced. The pass-end publish must not carry the
                         // event again: each Event::Shutdown bumps the sequence,
@@ -559,6 +559,27 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
             }
         }
 
+        // The estimate the tray shows under its status line, composed here
+        // because the agent knows the operative thresholds and the tray
+        // deliberately does not. Display only; nothing acts on it, and it is
+        // absent outside the on-battery phase -- pending has its own countdown.
+        let eta = match phase_of(action, &o) {
+            Phase::OnBattery => state.shutdown_eta(&o, &cfg).map(|(secs, route)| {
+                let why = match route {
+                    jdups::policy::EtaRoute::Runtime => format!(
+                        "at {} remaining",
+                        crate::journal::duration(u64::from(cfg.runtime_threshold_s))
+                    ),
+                    jdups::policy::EtaRoute::Backstop => format!(
+                        "at the {} on-battery limit",
+                        crate::journal::duration(cfg.max_on_battery_s)
+                    ),
+                };
+                (secs, why)
+            }),
+            _ => None,
+        };
+
         publish(
             &opts.dir,
             &mut published,
@@ -566,6 +587,7 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
             !dry_run,
             phase_of(action, &o),
             committed_at.map(|at| cfg.warn_before_s.saturating_sub(o.now_s.saturating_sub(at))),
+            eta,
             action,
             event,
         );
@@ -697,6 +719,7 @@ fn publish(
     armed: bool,
     phase: Phase,
     seconds_left: Option<u64>,
+    eta: Option<(u64, String)>,
     action: jdups::policy::Action,
     event: Event,
 ) {
@@ -721,6 +744,10 @@ fn publish(
     published.phase = phase;
     published.reason = reason;
     published.seconds_left = seconds_left;
+    (published.eta_s, published.eta_why) = match eta {
+        Some((secs, why)) => (Some(secs), Some(why)),
+        None => (None, None),
+    };
     published.armed = armed;
     published.updated = logfile::now_local().iso8601();
     // Only a real event advances the sequence. The tray keys "is this new" on
@@ -879,11 +906,11 @@ mod tests {
         let action = Action::Shutdown(jdups::policy::Why::Runtime);
 
         // The inner publish, right before execute...
-        publish(&dir, &mut published, &mut last, true, Phase::Pending, Some(0), action, Event::Shutdown);
+        publish(&dir, &mut published, &mut last, true, Phase::Pending, Some(0), None, action, Event::Shutdown);
         assert_eq!(published.seq, 1);
         assert_eq!(published.event, Event::Shutdown);
         // ...and the pass-end publish, which carries no event by then.
-        publish(&dir, &mut published, &mut last, true, Phase::Pending, Some(0), action, Event::None);
+        publish(&dir, &mut published, &mut last, true, Phase::Pending, Some(0), None, action, Event::None);
         assert_eq!(published.seq, 1, "the same shutdown was announced twice");
         assert_eq!(published.event, Event::Shutdown, "the event must survive a refresh");
         let _ = std::fs::remove_dir_all(&dir);
