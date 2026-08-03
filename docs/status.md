@@ -155,9 +155,17 @@ Be honest about these rather than assuming they work.
    Built and tested as far as it can be without elevation, and deliberately not
    switched over unattended. The PS 5.1 quoting bug that would have broken this
    install path is fixed; it still deserves a watched first run.
-3. **Re-run the plug-pull** (item 4 above) after the decision-path changes from
-   the 2026-08-02 review: the mains-return gate, the report-20 merge, and the
-   dead-handle reopen all sit on that path.
+3. ~~Re-run the plug-pull.~~ Done 2026-08-03, twice, on the post-review build
+   with PowerChute gone: transfer reason 8 identified both times, the latch
+   held through each outage, minute heartbeats recorded the charge sag
+   (100 → 79 within a minute, the documented model behaviour), the
+   mains-return debounce cleared cleanly, and the sleep hold released on cue.
+   The tray and the new power-event hooks behaved. The thresholds were not
+   crossed, so the *shutdown decision itself* still rests on the 2026-08-01
+   armed proof plus the policy suite; the absurd-threshold recipe (item 4
+   above) remains the way to exercise it end to end when wanted. Report 20 is
+   moot on this machine now: the battery driver owns the input stream, so
+   pushed reports no longer arrive at all.
 4. **`shutdown_on_wake`**, off by default. Needs the service, and needs a real
    sleep-and-plug-pull to prove. (Its previous implementation could never fire;
    see the review. The rewrite is tested but has not seen hardware.)
