@@ -81,9 +81,12 @@ impl Reading {
     /// — and on mains it reads as "how long could I survive right now", which is
     /// exactly what a UPS is for.
     ///
-    /// Nothing at all when the UPS is resting full on mains: this unit sits at
-    /// 100 % essentially always, and a permanent number is chartjunk on a 16 px
-    /// canvas.
+    /// Nothing at all when the UPS is resting full on mains: a permanent
+    /// number is chartjunk on a 16 px canvas. The threshold of 99 turned out
+    /// to be load-bearing, not slack: this unit's charge **tops out at 99 %
+    /// and never reports 100** (observed across full recharge cycles,
+    /// 2026-08-02), so a threshold of 100 would have meant digits that never
+    /// rest at all.
     ///
     /// Never returns three digits — minutes cap at 99 — which is what makes the
     /// two-digit layout sufficient. Above that the answer is "you are fine", and
@@ -458,6 +461,9 @@ mod tests {
         assert_eq!(r.icon_digits(), None);
     }
 
+    /// The 99 case is the one that exists: this unit's charge tops out at 99
+    /// and never reports 100 (measured, full recharge cycles, 2026-08-02), so
+    /// hiding only at 100 would be hiding never.
     #[test]
     fn a_full_unit_on_mains_shows_no_digits() {
         assert_eq!(on_mains(100).icon_digits(), None);
