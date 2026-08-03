@@ -90,9 +90,22 @@ Also in the tray: a **notification** when the power goes or returns, a **red
 countdown in the icon** while a shutdown is pending, an **audible alarm toggle**
 for the UPS itself, and **Open log**. Plus **power-event hooks**: three
 optional lines in `jdups.conf` run any command when the power goes, when a
-shutdown starts counting down, and when mains returns -- room lighting that
-goes amber on battery and red for the countdown, say. The tray runs them as
+shutdown starts counting down, and when mains returns. The tray runs them as
 you; the SYSTEM agent never executes anything. See docs/power-hooks.md.
+
+The hooks running on the machine this was built for wire it to
+[jdrgb](../jdrgb), the sibling project this one inherited its philosophy from,
+so the case lights go amber on battery, red while a shutdown counts down, and
+back to exactly what they were when mains returns:
+
+```
+on_battery_cmd = C:\bin\jdrgb.exe amber --all --stash
+on_pending_cmd = C:\bin\jdrgb.exe red --all --stash
+on_mains_cmd   = C:\bin\jdrgb.exe restore --all
+```
+
+Neither tool knows the other exists; the config file is the only place they
+meet.
 
 ## Quick start
 

@@ -22,12 +22,13 @@ Three optional keys in `jdups.conf`, empty or absent meaning off:
 ```
 
 Each is a full command line, run via `cmd /C` with no window, fire-and-forget.
-For the motivating case:
+The motivating case, as actually deployed (jdrgb's `--stash` saves the colour
+on the way into an alert; `restore` puts it back):
 
 ```
-on_battery_cmd = C:\bin\jdrgb.exe amber
-on_pending_cmd = C:\bin\jdrgb.exe red
-on_mains_cmd   = C:\bin\jdrgb.exe normal
+on_battery_cmd = C:\bin\jdrgb.exe amber --all --stash
+on_pending_cmd = C:\bin\jdrgb.exe red --all --stash
+on_mains_cmd   = C:\bin\jdrgb.exe restore --all
 ```
 
 (The "restore whatever it was before" version wanted jdrgb to remember its own
