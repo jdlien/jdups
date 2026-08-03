@@ -13,6 +13,7 @@
 
 mod device;
 mod draw;
+mod hooks;
 mod png;
 
 use std::time::Duration;
@@ -118,6 +119,10 @@ struct App {
     saw_outage: bool,
     /// Stat-before-parse reader for the agent's status file, polled at 1 Hz.
     agent_reader: jdups::status::Reader,
+    /// The power-event hook commands and their change detector. The tray is
+    /// the only executor; see docs/power-hooks.md for why the agent must not be.
+    hooks: hooks::Hooks,
+    hook_cmds: hooks::Commands,
     /// Whether the agent that published the pending shutdown can actually act.
     /// The menu and the notification have to say "would" rather than "will"
     /// while it cannot, or a dry run reads as an emergency.
@@ -329,6 +334,13 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             return 1;
         }
 
+        // The hook commands come from the same file the agent reads. A config
+        // the agent would refuse must not kill the tray; the hooks stay off.
+        let hook_cmds = jdups::config::default_path()
+            .and_then(|p| jdups::config::load(&p).ok())
+            .map(|s| hooks::Commands::from_settings(&s))
+            .unwrap_or_default();
+
         let mut app = Box::new(App {
             hwnd,
             nid: core::mem::zeroed(),
@@ -344,6 +356,8 @@ fn run(serial: Option<String>, test_balloon: bool) -> i32 {
             icon_added: false,
             saw_outage: false,
             agent_reader: jdups::status::Reader::new(),
+            hooks: hooks::Hooks::default(),
+            hook_cmds,
             agent_armed: false,
         });
         app.monitor = Some(device::Monitor::start(hwnd, WM_SNAPSHOT, serial));
@@ -585,6 +599,23 @@ unsafe fn refresh(app: *mut App) {
             }
         }
     }
+
+    unsafe { run_hooks(app, power) };
+}
+
+/// Fold the current state into the hook layer and fire at most one command.
+///
+/// Called wherever power or pending changes land: the end of every refresh
+/// and of every pending transition. The fold is what makes that safe -- a
+/// state the lights are already in never re-runs its command.
+unsafe fn run_hooks(app: *mut App, power: Power) {
+    let pending = unsafe { (*app).pending_until }.is_some();
+    let state = hooks::state_of(power, pending);
+    if let Some(s) = unsafe { &mut (*app).hooks }.observe(state) {
+        if let Some(cmd) = unsafe { &(*app).hook_cmds }.for_state(s) {
+            hooks::run(cmd);
+        }
+    }
 }
 
 /// Deliver the agent's shutdown warning, which the agent cannot deliver itself.
@@ -720,6 +751,11 @@ unsafe fn set_pending(app: *mut App, until: Option<u64>) {
         // there counting nothing.
         unsafe { refresh(app) };
     }
+    // The hooks hear about the pending change now rather than at the next
+    // repaint. Pending outranks an unknown power view, so a countdown that
+    // begins while the tray cannot see the UPS still turns the room red.
+    let power = unsafe { (*app).last_power }.unwrap_or(Power::Unknown);
+    unsafe { run_hooks(app, power) };
 }
 
 /// What to tell the user about a change of power state, if anything.

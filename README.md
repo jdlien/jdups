@@ -85,7 +85,11 @@ wanted.
 
 Also in the tray: a **notification** when the power goes or returns, a **red
 countdown in the icon** while a shutdown is pending, an **audible alarm toggle**
-for the UPS itself, and **Open log**.
+for the UPS itself, and **Open log**. Plus **power-event hooks**: three
+optional lines in `jdups.conf` run any command when the power goes, when a
+shutdown starts counting down, and when mains returns -- room lighting that
+goes amber on battery and red for the countdown, say. The tray runs them as
+you; the SYSTEM agent never executes anything. See docs/power-hooks.md.
 
 ## Quick start
 

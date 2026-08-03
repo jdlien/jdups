@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use crate::policy;
 
 /// Everything the agent reads from disk.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// May this agent actually shut the machine down?
     ///
@@ -32,6 +32,14 @@ pub struct Settings {
     /// otherwise.
     pub armed: bool,
     pub policy: policy::Config,
+    /// Commands the **tray** runs when the power state changes; the agent
+    /// parses these and deliberately ignores them. A SYSTEM process must not
+    /// execute configured command lines -- the named binary can live anywhere,
+    /// including somewhere user-writable -- so the unprivileged tray is the
+    /// only executor. Empty or absent means off. See docs/power-hooks.md.
+    pub on_battery_cmd: Option<String>,
+    pub on_pending_cmd: Option<String>,
+    pub on_mains_cmd: Option<String>,
 }
 
 // Written out rather than derived, which clippy would prefer. `armed` is the
@@ -40,7 +48,13 @@ pub struct Settings {
 #[allow(clippy::derivable_impls)]
 impl Default for Settings {
     fn default() -> Settings {
-        Settings { armed: false, policy: policy::Config::default() }
+        Settings {
+            armed: false,
+            policy: policy::Config::default(),
+            on_battery_cmd: None,
+            on_pending_cmd: None,
+            on_mains_cmd: None,
+        }
     }
 }
 
@@ -63,6 +77,9 @@ impl Settings {
             format!("warn_before_s = {}", p.warn_before_s),
             format!("os_shutdown_s = {}", p.os_shutdown_s),
             format!("shutdown_on_wake = {}", p.shutdown_on_wake),
+            format!("on_battery_cmd = {}", self.on_battery_cmd.as_deref().unwrap_or("")),
+            format!("on_pending_cmd = {}", self.on_pending_cmd.as_deref().unwrap_or("")),
+            format!("on_mains_cmd = {}", self.on_mains_cmd.as_deref().unwrap_or("")),
         ]
     }
 }
@@ -182,6 +199,20 @@ pub fn parse(text: &str) -> Result<Settings, Vec<String>> {
             "warn_before_s" => num(value).map(|v| s.policy.warn_before_s = v),
             "os_shutdown_s" => num(value).map(|v| s.policy.os_shutdown_s = v),
             "shutdown_on_wake" => flag(value).map(|v| s.policy.shutdown_on_wake = v),
+            // The tray's hook commands. Empty means off, so the shipped
+            // template stays inert when uncommented.
+            "on_battery_cmd" => {
+                s.on_battery_cmd = cmd(value);
+                Ok(())
+            }
+            "on_pending_cmd" => {
+                s.on_pending_cmd = cmd(value);
+                Ok(())
+            }
+            "on_mains_cmd" => {
+                s.on_mains_cmd = cmd(value);
+                Ok(())
+            }
             other => Err(format!("unknown setting `{other}`")),
         };
         if let Err(e) = r {
@@ -214,6 +245,11 @@ fn num<T: std::str::FromStr>(v: &str) -> Result<T, String> {
     v.parse::<T>().map_err(|_| {
         format!("`{v}` is not a whole number in range for this setting")
     })
+}
+
+fn cmd(v: &str) -> Option<String> {
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_string())
 }
 
 /// The file the installer writes, and the documentation of last resort.
@@ -283,6 +319,19 @@ pub const TEMPLATE: &str = r#"# jdups agent configuration.
 # resume. Off by default, because a setting that shuts a machine down sooner
 # than the thresholds say should be one you chose.
 # shutdown_on_wake = false
+
+# Commands to run when the power state changes, as full command lines. The
+# TRAY runs them, as you, with no console window; the SYSTEM agent never
+# executes anything from this file. Empty means off. "Pending" outranks
+# "battery", a dry-run countdown fires on_pending_cmd too, and losing sight of
+# the UPS changes nothing until the state is known again. A command line
+# cannot contain a '#'. See docs/power-hooks.md.
+#
+# For example, room lighting: amber on battery, red while a shutdown counts
+# down, back to normal when the power returns.
+# on_battery_cmd =
+# on_pending_cmd =
+# on_mains_cmd =
 "#;
 
 #[cfg(test)]
@@ -376,6 +425,19 @@ mod tests {
             assert!(!parse(&format!("armed = {no}")).unwrap().armed);
         }
         assert!(parse("armed = maybe").is_err());
+    }
+
+    /// The hook commands are free text after the `=`, spaces, quotes,
+    /// backslashes and all; an empty value is off, which is what keeps the
+    /// shipped template inert when its lines are uncommented.
+    #[test]
+    fn a_hook_command_survives_parsing_and_empty_means_off() {
+        let s = parse(r"on_battery_cmd = C:\bin\jdrgb.exe amber --brightness 80").unwrap();
+        assert_eq!(s.on_battery_cmd.as_deref(), Some(r"C:\bin\jdrgb.exe amber --brightness 80"));
+        assert_eq!(s.on_pending_cmd, None);
+
+        let s = parse("on_pending_cmd =\non_mains_cmd =  \n").unwrap();
+        assert_eq!(s, Settings::default(), "an empty command was not off");
     }
 
     /// Nothing about a default install, a missing file, or an empty one may

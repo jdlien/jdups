@@ -1,6 +1,9 @@
 # Power-event hooks: run a command when the power state changes
 
-Planned 2026-08-03, to be built immediately after. The motivating use is
+Planned and built 2026-08-03: three keys in `jdups.conf`, executed by the tray
+(`tray/hooks.rs`), the state fold pinned by tests. What remains is using it --
+uncomment the keys, restart the tray, and the next plug-pull is a lighting
+demo. The motivating use is
 lighting -- jdrgb sets the room amber on battery, red while a shutdown is
 pending, back to normal when mains returns -- but the feature is deliberately
 not about jdrgb. "Run this script when the power goes out" is the oldest
