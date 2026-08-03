@@ -74,6 +74,7 @@ const ID_INSTALLED: u32 = 5;
 const ID_OPEN_LOG: u32 = 6;
 const ID_EXIT: u32 = 7;
 const ID_ALARM: u32 = 8;
+const ID_OPEN_CONFIG: u32 = 9;
 
 const CF_UNICODETEXT: u32 = 13;
 
@@ -987,8 +988,12 @@ unsafe fn show_menu(app: *mut App, x: i32, y: i32) {
         // an error the tray should keep announcing.
         if jdups::logfile::newest_log().is_some() {
             add_item(menu, ID_OPEN_LOG, "Open log", true);
-            AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
         }
+        // Always: the file may not exist yet, and opening an editor at the
+        // place it belongs -- elevated if that is what saving there takes --
+        // is exactly how it comes to exist.
+        add_item(menu, ID_OPEN_CONFIG, "Open config", true);
+        AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
         // Deliberately down here with the actions, not up among the readings.
         // Every row above copies to the clipboard; this one changes the UPS, and
         // reaching for a number should not be able to silence an alarm. Greyed
@@ -1052,7 +1057,13 @@ unsafe fn on_command(app: *mut App, id: u32, snap: &Snapshot) {
         }
         ID_OPEN_LOG => {
             if let Some(p) = jdups::logfile::newest_log() {
-                unsafe { open_as_text(&p) };
+                unsafe { open_as_text(&p, false) };
+            }
+        }
+        ID_OPEN_CONFIG => {
+            if let Some(p) = jdups::config::default_path() {
+                let elevated = config_needs_elevation(&p);
+                unsafe { open_as_text(&p, elevated) };
             }
         }
         // ID_INSTALLED is here although its row is disabled and cannot send a
@@ -1077,11 +1088,20 @@ unsafe fn on_command(app: *mut App, id: u32, snap: &Snapshot) {
 /// bundling or naming a viewer — it is simply asking the association system a
 /// more useful question. Falls back to the plain `open` verb if the lookup
 /// fails, which at worst restores the Excel behaviour.
-unsafe fn open_as_text(path: &std::path::Path) {
+/// `elevated` launches the same editor through the "runas" verb instead, which
+/// is what makes "Open config" useful on a machine-wide install: the conf is
+/// deliberately admin-writable only, and an unelevated Notepad can look at it
+/// but never save. The association is still queried with "open" -- "runas" is
+/// an execution verb, not a file-type one.
+unsafe fn open_as_text(path: &std::path::Path, elevated: bool) {
     use windows_sys::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE, ASSOCSTR_EXECUTABLE};
 
+    /// `SE_ERR_ACCESSDENIED`, which is also what a declined UAC prompt returns.
+    const ACCESS_DENIED: isize = 5;
+
     let file = wide(&path.to_string_lossy());
-    let verb = wide("open");
+    let assoc_verb = wide("open");
+    let verb = wide(if elevated { "runas" } else { "open" });
 
     let mut buf = [0u16; 512];
     let mut len = buf.len() as u32;
@@ -1090,7 +1110,7 @@ unsafe fn open_as_text(path: &std::path::Path) {
             ASSOCF_NONE,
             ASSOCSTR_EXECUTABLE,
             wide(".txt").as_ptr(),
-            verb.as_ptr(),
+            assoc_verb.as_ptr(),
             buf.as_mut_ptr(),
             &mut len,
         )
@@ -1110,11 +1130,36 @@ unsafe fn open_as_text(path: &std::path::Path) {
                 core::ptr::null(),
                 SW_SHOWNORMAL,
             )
-        };
+        } as isize;
         // ShellExecute returns <= 32 on failure.
-        if r as isize > 32 {
+        if r > 32 {
             return;
         }
+        // The user said no to the UAC prompt. That is an answer, not a failure
+        // to route around; falling through would only prompt them again.
+        if elevated && r == ACCESS_DENIED {
+            return;
+        }
+    }
+
+    if elevated {
+        // "runas" needs an executable, not a document, so the document-handler
+        // fallback below cannot elevate. Notepad is the one editor always
+        // present, and the shell resolves the bare name; a hardcoded viewer is
+        // against the house rules for the normal path, but the elevated
+        // fallback is already the path where the association system failed us.
+        let args = wide(&format!("\"{}\"", path.display()));
+        unsafe {
+            ShellExecuteW(
+                core::ptr::null_mut(),
+                verb.as_ptr(),
+                wide("notepad.exe").as_ptr(),
+                args.as_ptr(),
+                core::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        return;
     }
 
     unsafe {
@@ -1127,6 +1172,34 @@ unsafe fn open_as_text(path: &std::path::Path) {
             SW_SHOWNORMAL,
         )
     };
+}
+
+/// Whether saving the config will take an elevated editor.
+///
+/// Decided by asking the filesystem, not by guessing the install shape:
+/// opening for append is exactly the permission a save needs and changes
+/// nothing by itself. A per-user install's conf says yes and gets a plain
+/// editor with no UAC prompt; a machine-wide install's says no, because the
+/// installer ACLed the directory to SYSTEM/Administrators-write on purpose.
+///
+/// A file that does not exist yet is judged by whether we could create it,
+/// with the probe removed at once. If the remove ever lost a race, an empty
+/// conf means the defaults, exactly like a missing one.
+fn config_needs_elevation(path: &std::path::Path) -> bool {
+    use std::io::ErrorKind;
+    match std::fs::OpenOptions::new().append(true).open(path) {
+        Ok(_) => false,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(path);
+                    false
+                }
+                Err(_) => true,
+            }
+        }
+        Err(_) => true,
+    }
 }
 
 /// The clipboard, in the order that actually works.
@@ -1284,6 +1357,27 @@ mod tests {
     use super::*;
     use jdups::decode::{PresentStatus, PAGE_BATTERY};
     use jdups::model::Reading;
+
+    /// A writable config never prompts for elevation, and probing a missing
+    /// one leaves nothing behind. The denied case needs an ACL to simulate,
+    /// so it is exercised by the machine-wide install rather than here.
+    #[test]
+    fn the_elevation_probe_is_honest_and_leaves_no_residue() {
+        let dir = std::env::temp_dir().join("jdups-elev-probe-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let existing = dir.join("jdups.conf");
+        std::fs::write(&existing, "# hi\n").unwrap();
+        assert!(!config_needs_elevation(&existing), "a writable file demanded UAC");
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "# hi\n", "the probe changed the file");
+
+        let missing = dir.join("no-such.conf");
+        assert!(!config_needs_elevation(&missing), "a creatable file demanded UAC");
+        assert!(!missing.exists(), "the probe left its file behind");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Two digits is the whole budget the icon has. A warning longer than 99 s
     /// must clamp rather than wrap: 105 seconds wrapping to "05" would be a
