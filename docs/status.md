@@ -70,18 +70,41 @@ Not asserted, measured. The plug-pull capture is `docs/plug-pull.txt`.
 - The charge estimate is a *model*, not a measurement: it drops ~20 points
   within seconds of a transfer and recovers over hours, while battery voltage
   recovers in seconds. This shapes `policy.rs`'s settle window.
-- **The unit can wedge its USB interface outright** (2026-08-03, at
-  mains-return after its deepest discharge, with the inbox battery driver
-  newly sharing the bus): it still enumerates and opens succeed, but every
-  request fails from every process, string descriptors included -- the serial
-  reads as `(none)`. Reopening does not help; a physical replug does. Classic
-  APC "COMMLOST" behaviour, decades older than this project. What jdups does
-  about it: reopens back off to five minutes with one log line per transition
-  naming the replug remedy, on-battery read pressure was cut by two-thirds,
-  and the backstop consults `GetSystemPowerStatus` -- the battery driver's own
-  independent read of the same hardware -- before firing through device
-  silence, because the wedge plus an armed backstop nearly shut a machine
-  down on healthy mains.
+- **The unit can wedge its USB interface outright**, and **something on this
+  machine was provoking it.** Twice on 2026-08-03, both times within seconds
+  of mains returning: it still enumerates and opens succeed, but every request
+  fails from every process, string descriptors included -- the serial reads as
+  `(none)`. Reopening does not help; a physical replug does. Classic APC
+  "COMMLOST" shape, decades older than this project.
+
+  **The trigger was `jdrgb`, via the power-event hooks.** `HidApi::new()`
+  enumerates the whole HID bus, and on Windows enumeration is not passive: it
+  opens every device and asks for its string descriptors. jdrgb filtered by
+  VID/PID *after* that, so painting the case lights interrogated the UPS as a
+  side effect -- and `on_mains_cmd` fires that at mains-return, the one moment
+  the UPS firmware is busy with the transfer while Windows' battery driver
+  queries it too. The discriminating observation was the owner's: **amber on
+  battery was always harmless, `restore` on mains always fatal.** jdrgb now
+  uses `disable_device_discovery` + `add_devices(VID, PID)` and never touches
+  the UPS. One clean 3.5-minute pull afterwards, with reads, serial, `restore`
+  and recovery all healthy; 2-for-2 wedges before, 1-for-1 clean after, so
+  likely-fixed rather than proven -- a deeper pull is the outstanding evidence,
+  since both wedges had `below-capacity-limit` asserted.
+
+  What jdups does about it regardless, because a UPS is allowed to sulk:
+  reopens back off to five minutes with one log line per transition naming the
+  replug remedy, on-battery read pressure was cut by two-thirds, and the
+  backstop consults `GetSystemPowerStatus` -- the battery driver's own
+  independent read path -- before firing through device silence, requiring a
+  0 -> 1 edge within the outage so a cached "AC present" cannot defer it
+  forever. That last one closes a real near-miss: the wedge plus an armed
+  backstop had a clean shutdown aimed at a machine on healthy mains.
+- **Writing the GPU's LEDs can disturb the display for a moment.** jdrgb
+  reaches that controller over the card's own I2C bus through NVAPI, which is
+  display plumbing, so a brief glitch is inherent to the route. Observed only
+  when two GPU writes landed seconds apart during manual testing; the hooks
+  fire minutes apart in practice and a real outage produced none. `--mb`
+  drops the GPU from a hook if it ever matters.
 
 ## Not verified
 

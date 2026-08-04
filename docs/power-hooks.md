@@ -79,6 +79,22 @@ for.)
   command that fails is a cosmetic problem in the cosmetic process. Test by
   toggling the state, not by reading logs.
 
+## What the hooks cost the UPS, and the rule that follows
+
+A hook runs a program *while the power is failing*, which turns out to matter
+more than it sounds. On 2026-08-03 `jdrgb restore` at mains-return wedged the
+UPS's USB interface twice, because `HidApi::new()` enumerates the whole HID bus
+and Windows enumeration opens every device to read its string descriptors --
+so a command about case lights was interrogating the UPS at the worst possible
+instant. jdrgb was fixed to look at one VID/PID (see status.md), but the
+general lesson belongs here:
+
+**A hook command should touch nothing this program depends on.** Anything that
+scans USB, HID, or the power subsystem is being invoked at exactly the moment
+that subsystem is least able to take it. Lighting, sound, a notification, a
+log line: fine. A device inventory: not fine, however innocent it looks in
+isolation.
+
 ## Known limitations, accepted
 
 - The parser strips `#` comments, so a command line cannot contain a literal
