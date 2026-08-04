@@ -290,6 +290,10 @@ pub struct State {
     last_fresh: Option<u64>,
     /// When the machine last resumed with nobody involved, for the wake route.
     wake_at: Option<u64>,
+    /// Whether the OS's battery driver reported the current outage too. What
+    /// turns a later "AC present" from a cached leftover into an edge worth
+    /// believing; see the backstop.
+    os_saw_offline: bool,
     /// Whether that wake has been tied to the current outage. Sticky until the
     /// outage clears or a person shows up, so the grace period cannot outlast
     /// the attribution window and watch the decision evaporate.
@@ -386,8 +390,17 @@ impl State {
                     // is an ordinary outage, whoever woke the machine.
                     self.wake_at = None;
                     self.wake_armed = false;
+                    // And the OS edge belonged to this outage; the next one
+                    // must earn its own.
+                    self.os_saw_offline = false;
                 }
             }
+        }
+
+        // The OS corroborating the outage is remembered per outage: it is the
+        // first half of the 0 -> 1 edge the backstop's reprieve requires.
+        if self.outage_since.is_some() && o.os_ac_present == Some(false) {
+            self.os_saw_offline = true;
         }
 
         // The device saying so outranks anything computed. Not debounced, not
@@ -449,18 +462,24 @@ impl State {
         // still fire.
         //
         // Unless the operating system, reading the same hardware through its
-        // own battery driver, affirmatively says mains is present. The
-        // backstop exists for a device that stopped telling the truth, and an
-        // independent stack saying "power is fine" is better evidence than a
-        // deadline computed from our own blindness. The failure directions
-        // were weighed: if both stacks are wrong the same way, the machine
-        // ends up where it was before this agent existed, running on the UPS
-        // until the battery dies, which is recoverable; the alternative fired
-        // a clean shutdown on healthy mains and left the machine off and
-        // unattended, which nearly happened for real on 2026-08-03 when the
-        // UPS wedged at mains-return. Absent or negative OS evidence changes
-        // nothing.
-        if on_battery_for >= cfg.max_on_battery_s && o.os_ac_present != Some(true) {
+        // own battery driver, says mains **came back**: AC present now, after
+        // reporting the outage earlier -- the 0 -> 1 edge is what makes the
+        // reading evidence. The backstop exists for a device that stopped
+        // telling the truth, and another stack having watched the power fail
+        // and return beats a deadline computed from our own blindness; that
+        // exact sequence nearly shut a machine down on healthy mains on
+        // 2026-08-03, when the UPS wedged at mains-return.
+        //
+        // The edge requirement is the second review's correction to the first
+        // draft, which trusted any positive reading: the OS path is
+        // independent plumbing but **not an independent sensor** -- its driver
+        // reads the same wedged device and its value carries no freshness. A
+        // cached "AC present" that never once said offline during this outage
+        // is a leftover, and deferring on it forever turns a wedge that
+        // persists into a real outage into a battery-exhaustion power cut.
+        // Absent, negative, or edge-less OS evidence changes nothing.
+        let os_says_mains_returned = o.os_ac_present == Some(true) && self.os_saw_offline;
+        if on_battery_for >= cfg.max_on_battery_s && !os_says_mains_returned {
             return Action::Shutdown(Why::Backstop);
         }
 
@@ -1064,15 +1083,23 @@ mod tests {
     /// at mains-return, the latch was held, and an armed backstop counted
     /// toward shutting down a machine on healthy mains -- through device
     /// silence, exactly as designed. Windows' battery driver is an independent
-    /// read path to the same hardware, and its affirmative "AC present" now
-    /// defers the backstop the way a fresh mains reading defers it.
+    /// read path to the same hardware, and its "AC present" defers the
+    /// backstop -- but only after it reported the outage too. The edge is what
+    /// makes the reading evidence rather than a cached leftover.
     #[test]
-    fn the_backstop_defers_to_the_os_saying_mains_is_present() {
+    fn the_backstop_defers_to_the_os_saying_mains_came_back() {
         let c = cfg();
         let mut s = State::new();
         s.observe(&mains(0), &c);
         s.observe(&battery(1, 90, 2000), &c);
-        // The device goes silent, the deadline passes, but the OS says AC.
+        // The OS sees the outage too...
+        s.observe(
+            &Observation { os_ac_present: Some(false), ..battery(2, 90, 2000) },
+            &c,
+        );
+        // ...the device goes silent, the deadline passes, and the OS reports
+        // mains back: the 0 -> 1 edge happened inside this outage, so it
+        // counts.
         let quiet_with_ac = |t| Observation {
             fresh: false,
             os_ac_present: Some(true),
@@ -1086,6 +1113,31 @@ mod tests {
         // The OS stops being able to say: the backstop is back in charge.
         let quiet_unknown = Observation { fresh: false, os_ac_present: None, ..battery(t + 1, 90, 2000) };
         assert_eq!(s.observe(&quiet_unknown, &c), Action::Shutdown(Why::Backstop));
+    }
+
+    /// The second review's counter-case: the OS reading is an independent
+    /// path, not an independent sensor, and it carries no freshness. A cached
+    /// "AC present" that never once said offline during this outage is a
+    /// leftover, not evidence, and deferring on it forever is how a wedge that
+    /// persists into a real outage becomes a battery-exhaustion power cut.
+    #[test]
+    fn a_cached_mains_reading_with_no_edge_cannot_defer_the_backstop() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        // The outage latches from the device, but the OS said AC the whole
+        // time -- its driver never saw the outage at all.
+        s.observe(
+            &Observation { os_ac_present: Some(true), ..battery(1, 90, 2000) },
+            &c,
+        );
+        let quiet_stale_ac = |t| Observation {
+            fresh: false,
+            os_ac_present: Some(true),
+            ..battery(t, 90, 2000)
+        };
+        let a = s.observe(&quiet_stale_ac(1 + c.max_on_battery_s), &c);
+        assert_eq!(a, Action::Shutdown(Why::Backstop), "a stale cached AC=1 deferred the backstop");
     }
 
     /// The OS saying "on battery" changes nothing anywhere: it is corroboration
