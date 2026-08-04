@@ -274,6 +274,16 @@ pub struct Observation {
     /// when it has one bound: an independent read path to the same hardware.
     /// `None` when Windows sees no system battery or cannot say, which keeps a
     /// bare desktop's permanent "AC online" from ever counting as evidence.
+    ///
+    /// **Precondition: the UPS is the only battery Windows knows about.**
+    /// `ACLineStatus` is system-wide and the composite battery driver
+    /// aggregates every source, so on a laptop -- or a desktop with any second
+    /// battery -- a dock or charger could move this while the UPS is on
+    /// battery, and the backstop's fallback below would take that for the
+    /// UPS's own recovery. jdups is a desktop-plus-UPS program and this is the
+    /// one place that assumption is load-bearing rather than merely true. If
+    /// this ever runs somewhere with an internal battery, the fallback must be
+    /// disabled rather than trusted; nothing else in the policy depends on it.
     pub os_ac_present: Option<bool>,
 }
 

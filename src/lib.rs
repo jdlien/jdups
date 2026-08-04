@@ -9,5 +9,6 @@ pub mod hid;
 pub mod logfile;
 pub mod model;
 pub mod policy;
+pub mod power_history;
 pub mod status;
 pub mod stop;

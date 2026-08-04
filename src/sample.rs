@@ -20,7 +20,17 @@ use jdups::stop::Stop;
 /// How long the parked read waits before looping.
 const READ_TIMEOUT_MS: u32 = 500;
 /// Cadence for the feature-only fields.
-const SWEEP_EVERY: Duration = Duration::from_secs(15);
+///
+/// Relaxed from 15 s once `--power-history` existed. The sweep is the
+/// sampler's *historian*: medians per interval, where the effective cadence is
+/// `min(SWEEP_EVERY, interval / 4)` so a five-minute window still gets about
+/// ten samples. It is a poor transient recorder and no longer asked to be one
+/// -- with the input stream permanently dead, a transition is caught only when
+/// a sweep happens to see it, so short cycles are missed here and read from
+/// Windows' own ledger instead. Halving the traffic at a device that wedged
+/// under it on 2026-08-03 is the trade; up to 30 s of latency on noticing a
+/// self-test is the cost, against a monthly self-test.
+const SWEEP_EVERY: Duration = Duration::from_secs(30);
 const RETRY_MIN: Duration = Duration::from_secs(2);
 /// How often to try to recover a failed input stream, backing off because it can
 /// fail permanently: the inbox HID battery driver owns the stream once Windows

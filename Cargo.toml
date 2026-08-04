@@ -61,6 +61,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Power",               # SetThreadExecutionState
     "Win32_System_Services",            # running as a service
     "Win32_Security",                   # AdjustTokenPrivileges (already above)
+    "Win32_System_EventLog",            # EvtQuery, for --power-history
 ] }
 
 [profile.release]

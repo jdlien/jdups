@@ -30,6 +30,11 @@ USAGE:
     --set ID VALUE   Write a feature report and read it back. Refuses to *arm*
                      the UPS countdown; -1, which cancels one, is always allowed
 
+    --power-history [DAYS]
+                     How bad is the mains, from the log Windows already keeps.
+                     Reads Kernel-Power 105 events: no UPS traffic at all, and
+                     it catches outages far shorter than the sampler can
+
     --sample         Log to CSV continuously. This is the headless logger the
                      scheduled task runs; it is the only writer of the log.
     --interval SECS  Seconds per row (default 300)
@@ -50,6 +55,7 @@ fn main() {
     let mut read_ids: Vec<u8> = Vec::new();
     let mut set_id: Option<u8> = None;
     let mut set_value: Option<i16> = None;
+    let mut history_days: u32 = 7;
 
     let mut i = 0;
     while i < args.len() {
@@ -96,6 +102,16 @@ fn main() {
             }
             "--list" => mode = "list",
             "--log" => mode = "log",
+            "--power-history" => {
+                mode = "power-history";
+                // Optional count, like --watch: a bare flag means the default.
+                if let Some(next) = args.get(i + 1) {
+                    if let Ok(n) = next.parse::<u32>() {
+                        history_days = n;
+                        i += 1;
+                    }
+                }
+            }
             "--watch" => {
                 mode = "watch";
                 if let Some(next) = args.get(i + 1) {
@@ -141,12 +157,90 @@ fn main() {
             }
         },
         "list" => cmd_list(),
+        "power-history" => cmd_power_history(history_days),
         "sample" => cmd_sample(serial, interval, dir, verbose),
         "read" => run_read(serial.as_deref(), &read_ids),
         "set" => run_set(serial.as_deref(), set_id, set_value),
         _ => run(mode, serial.as_deref(), watch_secs),
     };
     std::process::exit(code);
+}
+
+/// How bad is the mains? Answered from Windows' own log, not from the UPS.
+///
+/// The sampler measures; it is a poor witness of *short* events, because with
+/// the input stream dead it only notices a transition when a sweep happens to
+/// see one. Windows' battery driver is pushed every power-source change and
+/// journals it, so this reads that instead: five plug-pulls that gave the CSV
+/// three rows gave the System log nine events. No device traffic at all, which
+/// is the whole point -- polling the UPS harder is what wedged it once already.
+fn cmd_power_history(days: u32) -> i32 {
+    let edges = match jdups::power_history::read(days) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("jdups: {e}");
+            return 1;
+        }
+    };
+    let s = jdups::power_history::summarize(&edges);
+
+    println!("power source changes Windows recorded in the last {days} day(s)\n");
+    if s.spans.is_empty() {
+        println!("  none. Either the mains held, or Windows has not been");
+        println!("  recording: see the caveat below.");
+    } else {
+        println!(
+            "  transfers to battery   {}{}",
+            s.transfers,
+            if s.brief > 0 {
+                format!("   ({} shorter than {} s)", s.brief, jdups::power_history::BRIEF_S)
+            } else {
+                String::new()
+            }
+        );
+        println!(
+            "  time on battery        {}, longest {}",
+            secs(s.total_on_battery_s),
+            secs(s.longest_on_battery_s)
+        );
+        println!();
+        // Local time, because this report sits next to a CSV written in local
+        // time and nobody should be doing zone arithmetic to compare them.
+        let offset = jdups::logfile::now_local().offset_min;
+        for sp in &s.spans {
+            println!(
+                "  {}  {:<9} {}",
+                jdups::power_history::to_local(&sp.from, offset).unwrap_or_else(|| sp.from.clone()),
+                if sp.on_mains { "mains" } else { "BATTERY" },
+                match sp.seconds {
+                    Some(n) => secs(n),
+                    // Never invent a duration for a span the window cut off.
+                    None => "(still, or the window ends here)".to_string(),
+                }
+            );
+        }
+    }
+
+    // Said every time, because a quiet report is exactly when someone would
+    // otherwise read more into it than it says.
+    println!();
+    println!("  This is Windows' record, not the UPS's: it is blind while the");
+    println!("  machine is off or asleep, it needs Windows to see the UPS as a");
+    println!("  battery, and the System log rolls over. Silence is not proof of");
+    println!("  clean power. The sampler's CSV has the measurements.");
+    0
+}
+
+fn secs(n: i64) -> String {
+    if n < 90 {
+        return format!("{n} s");
+    }
+    let (m, r) = (n / 60, n % 60);
+    if r == 0 {
+        format!("{m} min")
+    } else {
+        format!("{m} min {r} s")
+    }
 }
 
 /// A bad argument is fatal. The alternative was silently falling back to a

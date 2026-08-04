@@ -620,22 +620,9 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         // deliberately does not. Display only; nothing acts on it, and it is
         // absent outside the on-battery phase -- pending has its own countdown.
         let eta = match phase_of(action, state.on_battery()) {
-            Phase::OnBattery => state.shutdown_eta(&o, &cfg).map(|(secs, route)| {
-                // Capitalised: the tray renders this as its own menu row.
-                // The backstop's phrase carries no number on purpose -- the
-                // estimate next to it *is* that number, and restating it was
-                // what made the menu wide.
-                let why = match route {
-                    // Exact, not rounded: this is a margin, and "At 5 min"
-                    // for a 280 s threshold overstated it by twenty seconds.
-                    jdups::policy::EtaRoute::Runtime => format!(
-                        "At {} of runtime remaining",
-                        crate::journal::duration_exact(u64::from(cfg.runtime_threshold_s))
-                    ),
-                    jdups::policy::EtaRoute::Backstop => "At the on-battery time limit".to_string(),
-                };
-                (secs, why)
-            }),
+            Phase::OnBattery => state
+                .shutdown_eta(&o, &cfg)
+                .map(|(secs, route)| (secs, eta_why(route, cfg.runtime_threshold_s))),
             _ => None,
         };
 
@@ -826,6 +813,41 @@ fn publish(
     }
 }
 
+/// What the agent is waiting for, in a phrase, for the dim menu row under the
+/// tray's estimate. Composed here because the agent knows the operative
+/// thresholds and the tray deliberately does not. Capitalised: the tray renders
+/// it as a row of its own.
+///
+/// Kept short, and that is layout, not taste. A menu row with no tab in it
+/// spends its whole width in the menu's *left* column, so this one phrase, not
+/// any reading, decides how wide the menu draws. Measured in the menu font,
+/// Segoe UI 9pt at 96 dpi, against 91 px for "Battery installed", the widest
+/// label it competes with:
+///
+/// - "At 4 min 40 s of runtime remaining" was 191 px, and cost the menu 100 px
+/// - "At 4 min 40 s remaining" is 132 px, and costs it 41
+///
+/// The 41 px is deliberate. "Remaining" says what the number is; without it the
+/// row is 95 px and free, which was the tempting version and the worse one.
+///
+/// Neither phrase says "runtime" or "on battery": the status row immediately
+/// above says both, in the same units.
+fn eta_why(route: jdups::policy::EtaRoute, runtime_threshold_s: u16) -> String {
+    match route {
+        // Exact, not rounded: this is a margin, and "At 5 min" for a 280 s
+        // threshold overstated it by twenty seconds.
+        jdups::policy::EtaRoute::Runtime => {
+            format!(
+                "At {} remaining",
+                crate::journal::duration_exact(u64::from(runtime_threshold_s))
+            )
+        }
+        // No number on purpose. The estimate on the row above *is* that number,
+        // and restating it here is what made the menu wide the first time.
+        jdups::policy::EtaRoute::Backstop => "At the time limit".to_string(),
+    }
+}
+
 fn describe_countdown(c: &(Option<i16>, Option<u8>, Option<i16>)) -> String {
     let show = |v: Option<i16>| match v {
         Some(-1) => "none".to_string(),
@@ -929,7 +951,7 @@ fn tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jdups::policy::Action;
+    use jdups::policy::{Action, EtaRoute};
 
     fn status(ac: bool, imminent: bool) -> PresentStatus {
         PresentStatus {
@@ -937,6 +959,28 @@ mod tests {
             discharging: !ac,
             shutdown_imminent: imminent,
             ..Default::default()
+        }
+    }
+
+    /// The reason is the one prose row in a menu of two-column readings, and a
+    /// row without a tab in it sets the left column's width by itself. 23
+    /// characters is that pixel budget in a form a test can hold: the longest
+    /// this phrase gets is "At 4 min 40 s remaining", 132 px of Segoe UI 9pt
+    /// against 91 px for "Battery installed", which is the 41 px the menu pays
+    /// for the wording. Every other threshold is shorter, not longer: 3600 s
+    /// reads "At 60 min remaining", and only a value with all three units in it
+    /// reaches the budget at all.
+    #[test]
+    fn the_reason_row_stays_within_its_width_budget() {
+        assert_eq!(eta_why(EtaRoute::Runtime, 280), "At 4 min 40 s remaining");
+        assert_eq!(eta_why(EtaRoute::Backstop, 280), "At the time limit");
+        for s in [
+            eta_why(EtaRoute::Runtime, 30),
+            eta_why(EtaRoute::Runtime, 280),
+            eta_why(EtaRoute::Runtime, 3600),
+            eta_why(EtaRoute::Backstop, 280),
+        ] {
+            assert!(s.chars().count() <= 23, "too wide for the left column: {s}");
         }
     }
 
