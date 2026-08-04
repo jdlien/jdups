@@ -133,7 +133,8 @@ pub struct Accumulator {
     status: Option<PresentStatus>,
     /// Free text for whatever the event was: a test result, a transfer code.
     detail: String,
-    /// Stream samples seen. This is the `n` column.
+    /// Charge/runtime samples folded in, from the input stream while it lives
+    /// and from the sweep once it does not. This is the `n` column.
     pub samples: u32,
 }
 

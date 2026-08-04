@@ -318,6 +318,16 @@ fn sweep(dev: &hid::raw::Device, acc: &mut Accumulator) -> Option<PresentStatus>
         f(report::BATTERY_VOLTS).as_deref().and_then(decode::battery_volts),
         rated,
     );
+    // Charge and runtime, which normally arrive on the input stream -- but the
+    // stream dies for good once Windows binds its battery driver, and without
+    // this read the months-long series lost exactly its two key columns: every
+    // row after the 2026-08-03 reboot had empty charge and runtime with n = 0.
+    // "Runtime at a known load, tracked over months" is the series this
+    // program exists to keep, and it was the one thing the sampler stopped
+    // recording.
+    if let Some(b) = f(report::CHARGE_RUNTIME) {
+        acc.push_stream(decode::charge(&b), decode::runtime_s(&b));
+    }
     let s = f(report::PRESENT_STATUS).map(|b| dev.status_of(&b, false));
     if let Some(s) = s {
         acc.set_status(s);
