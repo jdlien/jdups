@@ -372,28 +372,40 @@ impl State {
         }
 
         // --- the latch --------------------------------------------------
-        // A confirmed outage stays confirmed until mains is *freshly* confirmed
-        // back, for long enough to not be a flap. Silence never clears it.
-        if o.fresh {
-            if o.on_battery {
-                self.mains_since = None;
-                if self.outage_since.is_none() {
-                    self.outage_since = Some(o.now_s);
-                    self.qualifying_since = None;
-                }
-            } else {
-                let since = *self.mains_since.get_or_insert(o.now_s);
-                if o.now_s.saturating_sub(since) >= cfg.debounce_s {
-                    self.outage_since = None;
-                    self.qualifying_since = None;
-                    // The episode the wake belonged to is over. The next outage
-                    // is an ordinary outage, whoever woke the machine.
-                    self.wake_at = None;
-                    self.wake_armed = false;
-                    // And the OS edge belonged to this outage; the next one
-                    // must earn its own.
-                    self.os_saw_offline = false;
-                }
+        // A confirmed outage stays confirmed until mains is confirmed back,
+        // for long enough to not be a flap. Device silence alone never clears
+        // it.
+        //
+        // The device is the witness whenever it is talking. When it has gone
+        // silent, the operating system's battery driver stands in -- but only
+        // with the 0 -> 1 edge inside this outage, so a value Windows might
+        // merely be repeating back cannot end an outage it never saw begin.
+        // **Ending the outage, rather than suspending the backstop, is the
+        // point**: two reviews independently observed that an indefinite
+        // reprieve is its own hazard, since a wedge outliving the outage would
+        // leave a latch nothing could clear and a deadline deferred into the
+        // next real one. Ending it lands the agent in a state it already
+        // understands -- blind on mains, where silence is not an emergency and
+        // a fresh battery reading starts a fresh outage.
+        let os_says_mains_returned = o.os_ac_present == Some(true) && self.os_saw_offline;
+        if o.fresh && o.on_battery {
+            self.mains_since = None;
+            if self.outage_since.is_none() {
+                self.outage_since = Some(o.now_s);
+                self.qualifying_since = None;
+            }
+        } else if (o.fresh && !o.on_battery) || (!o.fresh && os_says_mains_returned) {
+            let since = *self.mains_since.get_or_insert(o.now_s);
+            if o.now_s.saturating_sub(since) >= cfg.debounce_s {
+                self.outage_since = None;
+                self.qualifying_since = None;
+                // The episode the wake belonged to is over. The next outage
+                // is an ordinary outage, whoever woke the machine.
+                self.wake_at = None;
+                self.wake_armed = false;
+                // And the OS edge belonged to this outage; the next one
+                // must earn its own.
+                self.os_saw_offline = false;
             }
         }
 
@@ -478,7 +490,10 @@ impl State {
         // is a leftover, and deferring on it forever turns a wedge that
         // persists into a real outage into a battery-exhaustion power cut.
         // Absent, negative, or edge-less OS evidence changes nothing.
-        let os_says_mains_returned = o.os_ac_present == Some(true) && self.os_saw_offline;
+        //
+        // This only has to hold the line for the debounce: a sustained OS
+        // mains-return clears the latch above, and then there is no deadline
+        // left to defer.
         if on_battery_for >= cfg.max_on_battery_s && !os_says_mains_returned {
             return Action::Shutdown(Why::Backstop);
         }
@@ -1113,6 +1128,40 @@ mod tests {
         // The OS stops being able to say: the backstop is back in charge.
         let quiet_unknown = Observation { fresh: false, os_ac_present: None, ..battery(t + 1, 90, 2000) };
         assert_eq!(s.observe(&quiet_unknown, &c), Action::Shutdown(Why::Backstop));
+    }
+
+    /// Two reviews, independently: an indefinite reprieve is its own hazard.
+    /// A sustained OS mains-return during device silence must *end the
+    /// outage*, not suspend the backstop forever -- otherwise a wedge that
+    /// outlives the outage leaves a latch nothing can clear, and the next real
+    /// outage finds the backstop still deferred by a value Windows may simply
+    /// be repeating back. Ending it puts the agent in a state it already
+    /// understands: blind on mains, where silence is not an emergency.
+    #[test]
+    fn a_sustained_os_mains_return_ends_the_outage_rather_than_deferring_forever() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&battery(1, 90, 2000), &c);
+        // The OS sees the outage too, then the device wedges and the OS
+        // reports mains back for longer than the debounce.
+        s.observe(&Observation { os_ac_present: Some(false), ..battery(2, 90, 2000) }, &c);
+        let silent_ac = |t| Observation {
+            fresh: false,
+            os_ac_present: Some(true),
+            ..battery(t, 90, 2000)
+        };
+        for t in 3..=3 + c.debounce_s {
+            assert!(!s.observe(&silent_ac(t), &c).is_shutdown(), "acted at t={t}");
+        }
+        assert!(!s.on_battery(), "the latch survived a sustained OS mains return");
+
+        // ...so the deadline it was counting toward is simply gone, and no
+        // later silence resurrects it.
+        for t in 3 + c.debounce_s..3 + c.debounce_s + c.max_on_battery_s * 2 {
+            let o = Observation { fresh: false, os_ac_present: None, ..battery(t, 90, 2000) };
+            assert!(!s.observe(&o, &c).is_shutdown(), "a cleared outage fired at t={t}");
+        }
     }
 
     /// The second review's counter-case: the OS reading is an independent

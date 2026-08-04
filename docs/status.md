@@ -351,6 +351,65 @@ Worth re-running after any big change to what is normally open:
 Get-WinEvent -FilterHashtable @{LogName='System'; Id=1074,13} -MaxEvents 200
 ```
 
+## The wedge: what two reviews recommended, and what was built
+
+Both reviews (Codex and a second Claude Code session) were run before jdrgb was
+identified as the trigger, so they reasoned about a firmware fault with no known
+cause. They converged, which is worth something, and their agreements were
+mostly built. What was not built is listed with its reasoning, because a cause
+we have probably removed does not justify the most invasive remedy.
+
+**Built.** The read-pressure cut; the reopen backoff with one line per
+transition; the OS second opinion on the backstop, edge-gated so a value
+Windows may be repeating back cannot end an outage it never saw begin; and,
+after both reviews independently warned that an indefinite reprieve is its own
+hazard, a sustained OS mains-return now **ends the outage** instead of
+suspending the backstop -- which lands the agent in a state it already
+understands, blind on mains, rather than holding a latch nothing can clear.
+Plus a five-second quiet window on the diagnostic reads after any transfer, the
+moment both reviews named as the fragile one.
+
+**Not built: programmatic recovery via `IOCTL_USB_HUB_CYCLE_PORT`.** Both
+reviews ranked it first for self-healing, and it is the right design if the
+wedge recurs. It is also a chunk of `unsafe` device manipulation in the binary
+allowed to shut the machine down, guarding a fault whose trigger has since been
+removed from jdrgb. Deferred on that basis alone -- not on doubt about the
+approach. The design, should it be needed:
+
+- Discover the parent hub and its 1-based connection index **while healthy**
+  and cache them: the serial vanishes when wedged, so rediscovery by
+  `051D:0002` at that moment is unreliable.
+- Close and cancel every handle and request first; the cycle invalidates them.
+- One cycle per silence transition, with a cooldown that survives a restart.
+- Never during a shutdown transaction or with a countdown armed.
+- Treat `DeviceIoControl` success as "cycle issued", not "recovered": require
+  both a serial read and a status feature read before believing it.
+- Expect the `HID UPS Battery` child and Windows' own battery state to reset
+  too, briefly reading as absent. That is unavoidable and correct.
+- Known limit: Microsoft documents cycle-port as a **software** disconnect, not
+  an electrical one. If this unit needs true VBUS loss, no API can replace the
+  cable, and the honest answer stays "replug it".
+
+**Not built: one USB owner.** Having the agent broker readings for the tray and
+sampler would halve the consumers, and was ranked highly. It also inverts the
+privilege direction this project is built on -- the unprivileged tray reading
+its own device is what keeps it independent of a SYSTEM service -- for a
+pressure problem that was never the primary defect. Declined as an
+architecture change wearing a mitigation's clothes.
+
+**Ruled out, with evidence.** Selective suspend was already disabled on this
+devnode (`SelectiveSuspendEnabled = 00`, configured `input.inf HID_Inst`
+rather than `HID_SelSus_Inst`, attached directly to `USB\ROOT_HUB30` port 8),
+so it explains nothing here and should not be changed. Likewise
+`EnhancedPowerManagementEnabled` and `ResetOnResume`: nothing about an
+awake-S0 mains-return matches them.
+
+**If it recurs, the diagnostic worth capturing** is a USB ETW trace across the
+event -- `logman` on USBXHCI, UCX and USBHUB3 -- because the discriminator is
+the completion status of the *first* failed control request: timeout, stall,
+port reset, or host cancellation. That distinguishes firmware deadlock from a
+wedged host stack, which no amount of application-level logging can.
+
 ## Review findings deliberately not fixed
 
 Recorded so they read as decisions rather than oversights. Someone should feel

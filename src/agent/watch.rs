@@ -77,6 +77,15 @@ const REOPEN_BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// unit wedged its USB interface at mains-return with three of our readers
 /// plus Windows' battery driver all querying it through a transfer event.
 const COUNTDOWN_WATCH_MAINS_EVERY: Duration = Duration::from_secs(30);
+/// How long to hold off the inessential reads after the power moves.
+///
+/// A transfer is the moment the UPS is busiest -- relay, charger, runtime
+/// recalculation -- and the moment two reviews independently named as where
+/// its USB firmware is most fragile. The reads that matter still happen: the
+/// status poll, the numbers, and the transfer reason the log is opened for.
+/// What waits is the countdown watch, which is diagnostic and has nothing to
+/// catch in the seconds after a transfer.
+const QUIET_AFTER_TRANSFER: Duration = Duration::from_secs(5);
 
 pub struct Options {
     pub settings: Settings,
@@ -151,6 +160,8 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
     let mut numbers_at: Option<Instant> = None;
     let mut last_countdown: Option<(Option<i16>, Option<u8>, Option<i16>)> = None;
     let mut last_countdown_look: Option<Instant> = None;
+    // Set on every power transition; see QUIET_AFTER_TRANSFER.
+    let mut quiet_until: Option<Instant> = None;
     // When the device last actually answered. `Observation::fresh` is per-pass
     // and says nothing about health; this is what the log should report.
     let mut last_answer = Instant::now();
@@ -494,6 +505,9 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
                     },
                 );
             }
+            // The power just moved, in either direction: give the device a few
+            // seconds without the diagnostic reads.
+            quiet_until = Some(Instant::now() + QUIET_AFTER_TRANSFER);
             holding_awake = on_battery_now;
             hold_awake(on_battery_now);
             say(
@@ -605,7 +619,7 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         // because the agent knows the operative thresholds and the tray
         // deliberately does not. Display only; nothing acts on it, and it is
         // absent outside the on-battery phase -- pending has its own countdown.
-        let eta = match phase_of(action, &o) {
+        let eta = match phase_of(action, state.on_battery()) {
             Phase::OnBattery => state.shutdown_eta(&o, &cfg).map(|(secs, route)| {
                 // Capitalised: the tray renders this as its own menu row.
                 // The backstop's phrase carries no number on purpose -- the
@@ -630,7 +644,7 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
             &mut published,
             &mut last_publish,
             !dry_run,
-            phase_of(action, &o),
+            phase_of(action, state.on_battery()),
             committed_at.map(|at| cfg.warn_before_s.saturating_sub(o.now_s.saturating_sub(at))),
             eta,
             action,
@@ -641,7 +655,8 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         // Poll cadence on battery, slow on mains. See the constant for why the
         // old every-pass battery watch retired with PowerChute.
         let every = if o.on_battery { POLL_EVERY } else { COUNTDOWN_WATCH_MAINS_EVERY };
-        let look = last_countdown_look.is_none_or(|t| t.elapsed() >= every);
+        let quiet = quiet_until.is_some_and(|t| Instant::now() < t);
+        let look = !quiet && last_countdown_look.is_none_or(|t| t.elapsed() >= every);
         if look {
             if let Some(dev) = device.as_ref() {
                 last_countdown_look = Some(Instant::now());
@@ -735,10 +750,16 @@ fn hold_awake(on: bool) {
     }
 }
 
-fn phase_of(action: jdups::policy::Action, o: &Observation) -> Phase {
+/// The phase reports what the agent *believes*, which is the latch, not the
+/// last byte the device happened to say. They differ exactly when it matters:
+/// after a wedge, once a sustained OS mains-return has ended the outage, the
+/// held status still reads "battery" while the agent has stood down -- and
+/// publishing OnBattery there would put a shutdown estimate under a tray line
+/// about an outage that is over.
+fn phase_of(action: jdups::policy::Action, on_battery: bool) -> Phase {
     if action.is_shutdown() {
         Phase::Pending
-    } else if o.on_battery {
+    } else if on_battery {
         Phase::OnBattery
     } else {
         Phase::Idle
