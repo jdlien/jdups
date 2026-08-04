@@ -270,6 +270,11 @@ pub struct Observation {
     /// handler. An edge, not a level: `Alone`/`Attended` appear on exactly one
     /// observation each and `None` everywhere else.
     pub wake: WakeEvent,
+    /// The operating system's own view of mains, through its battery driver,
+    /// when it has one bound: an independent read path to the same hardware.
+    /// `None` when Windows sees no system battery or cannot say, which keeps a
+    /// bare desktop's permanent "AC online" from ever counting as evidence.
+    pub os_ac_present: Option<bool>,
 }
 
 /// What the agent remembers between observations.
@@ -442,7 +447,20 @@ impl State {
         // Runs before the staleness check on purpose. If the device went quiet
         // *during* an outage, the deadline is the only thing left, and it must
         // still fire.
-        if on_battery_for >= cfg.max_on_battery_s {
+        //
+        // Unless the operating system, reading the same hardware through its
+        // own battery driver, affirmatively says mains is present. The
+        // backstop exists for a device that stopped telling the truth, and an
+        // independent stack saying "power is fine" is better evidence than a
+        // deadline computed from our own blindness. The failure directions
+        // were weighed: if both stacks are wrong the same way, the machine
+        // ends up where it was before this agent existed, running on the UPS
+        // until the battery dies, which is recoverable; the alternative fired
+        // a clean shutdown on healthy mains and left the machine off and
+        // unattended, which nearly happened for real on 2026-08-03 when the
+        // UPS wedged at mains-return. Absent or negative OS evidence changes
+        // nothing.
+        if on_battery_for >= cfg.max_on_battery_s && o.os_ac_present != Some(true) {
             return Action::Shutdown(Why::Backstop);
         }
 
@@ -514,6 +532,7 @@ mod tests {
             charge: Some(100),
             runtime_s: Some(2600),
             wake: WakeEvent::None,
+            os_ac_present: None,
         }
     }
 
@@ -526,6 +545,7 @@ mod tests {
             charge: Some(charge),
             runtime_s: Some(runtime_s),
             wake: WakeEvent::None,
+            os_ac_present: None,
         }
     }
 
@@ -1038,6 +1058,48 @@ mod tests {
             assert!(!a.is_shutdown(), "backstop fired at t={t} against fresh mains");
         }
         assert!(!s.on_battery());
+    }
+
+    /// Found by a live near-miss, 2026-08-03. The UPS wedged its USB interface
+    /// at mains-return, the latch was held, and an armed backstop counted
+    /// toward shutting down a machine on healthy mains -- through device
+    /// silence, exactly as designed. Windows' battery driver is an independent
+    /// read path to the same hardware, and its affirmative "AC present" now
+    /// defers the backstop the way a fresh mains reading defers it.
+    #[test]
+    fn the_backstop_defers_to_the_os_saying_mains_is_present() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&battery(1, 90, 2000), &c);
+        // The device goes silent, the deadline passes, but the OS says AC.
+        let quiet_with_ac = |t| Observation {
+            fresh: false,
+            os_ac_present: Some(true),
+            ..battery(t, 90, 2000)
+        };
+        let t = 1 + c.max_on_battery_s + 100;
+        assert!(
+            !s.observe(&quiet_with_ac(t), &c).is_shutdown(),
+            "shut down on healthy mains through a wedged device"
+        );
+        // The OS stops being able to say: the backstop is back in charge.
+        let quiet_unknown = Observation { fresh: false, os_ac_present: None, ..battery(t + 1, 90, 2000) };
+        assert_eq!(s.observe(&quiet_unknown, &c), Action::Shutdown(Why::Backstop));
+    }
+
+    /// The OS saying "on battery" changes nothing anywhere: it is corroboration
+    /// of the outage, not a reprieve, and the thresholds already run on the
+    /// device's own fresher numbers.
+    #[test]
+    fn the_os_saying_battery_is_not_a_reprieve() {
+        let c = cfg();
+        let mut s = State::new();
+        s.observe(&mains(0), &c);
+        s.observe(&battery(1, 90, 2000), &c);
+        let quiet = |t| Observation { fresh: false, os_ac_present: Some(false), ..battery(t, 90, 2000) };
+        let a = s.observe(&quiet(1 + c.max_on_battery_s), &c);
+        assert_eq!(a, Action::Shutdown(Why::Backstop));
     }
 
     /// ...but a mains report the device has since gone silent on does not keep

@@ -200,6 +200,7 @@ mod tests {
             charge: Some(charge),
             runtime_s: Some(runtime_s),
             wake: jdups::policy::WakeEvent::None,
+            os_ac_present: None,
         }
     }
 

@@ -447,6 +447,7 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
             aged(charge, numbers_age_s, cfg.stale_after_s),
             aged(runtime_s, numbers_age_s, cfg.stale_after_s),
             wake_event,
+            os_ac_present(),
         );
         if o.fresh {
             last_answer = Instant::now();
@@ -835,6 +836,7 @@ fn observe(
     charge: Option<u8>,
     runtime_s: Option<u16>,
     wake: WakeEvent,
+    os_ac: Option<bool>,
 ) -> Observation {
     Observation {
         now_s: start.elapsed().as_secs(),
@@ -847,6 +849,32 @@ fn observe(
         charge,
         runtime_s,
         wake,
+        // Passed in rather than read here, so tests do not inherit the power
+        // state of whatever machine happens to run them.
+        os_ac_present: os_ac,
+    }
+}
+
+/// The operating system's own view of mains, through its inbox battery driver
+/// -- an independent read path to the same hardware, one syscall, no device
+/// I/O. `None` when Windows sees no system battery (the PowerChute era, or
+/// the driver unbound), which keeps a bare desktop's permanent "AC online"
+/// from ever counting as evidence, and `None` when either field says unknown.
+fn os_ac_present() -> Option<bool> {
+    use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    const BATTERY_FLAG_NO_BATTERY: u8 = 128;
+    const BATTERY_FLAG_UNKNOWN: u8 = 255;
+    let mut s: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
+    if unsafe { GetSystemPowerStatus(&mut s) } == 0 {
+        return None;
+    }
+    if s.BatteryFlag == BATTERY_FLAG_NO_BATTERY || s.BatteryFlag == BATTERY_FLAG_UNKNOWN {
+        return None;
+    }
+    match s.ACLineStatus {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
     }
 }
 
@@ -895,7 +923,7 @@ mod tests {
     #[test]
     fn numbers_without_a_status_are_not_fresh() {
         let start = Instant::now();
-        let o = observe(&start, true, &None, Some(80), Some(1800), WakeEvent::None);
+        let o = observe(&start, true, &None, Some(80), Some(1800), WakeEvent::None, None);
         assert!(!o.fresh);
         assert!(!o.on_battery);
     }
@@ -903,7 +931,7 @@ mod tests {
     #[test]
     fn a_status_read_carries_both_flags_through() {
         let start = Instant::now();
-        let o = observe(&start, true, &Some(status(false, true)), Some(80), Some(1800), WakeEvent::None);
+        let o = observe(&start, true, &Some(status(false, true)), Some(80), Some(1800), WakeEvent::None, None);
         assert!(o.fresh);
         assert!(o.on_battery);
         assert!(o.shutdown_imminent);
@@ -913,7 +941,7 @@ mod tests {
     #[test]
     fn a_failed_tick_keeps_the_numbers_and_drops_freshness() {
         let start = Instant::now();
-        let o = observe(&start, false, &Some(status(false, false)), Some(80), Some(1800), WakeEvent::None);
+        let o = observe(&start, false, &Some(status(false, false)), Some(80), Some(1800), WakeEvent::None, None);
         assert!(!o.fresh);
         assert_eq!(o.charge, Some(80));
         assert!(o.on_battery, "the latch has to see the last known state");
@@ -965,13 +993,13 @@ mod tests {
 
         // Seen on battery once, then nothing ever again.
         let seen = Some(status(false, false));
-        let mut o = observe(&start, true, &seen, Some(90), Some(2000), WakeEvent::None);
+        let mut o = observe(&start, true, &seen, Some(90), Some(2000), WakeEvent::None, None);
         o.now_s = 0;
         assert_eq!(state.observe(&o, &cfg), Action::Warn);
 
         let mut last = Action::Nothing;
         for t in 1..=cfg.max_on_battery_s {
-            let mut o = observe(&start, false, &seen, Some(90), Some(2000), WakeEvent::None);
+            let mut o = observe(&start, false, &seen, Some(90), Some(2000), WakeEvent::None, None);
             o.now_s = t;
             last = state.observe(&o, &cfg);
         }
