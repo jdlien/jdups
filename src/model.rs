@@ -398,6 +398,28 @@ impl Snapshot {
         }
         self.reading.status_line()
     }
+
+    /// The status line as menu columns: where the power is coming from, then
+    /// the numbers. Splitting it lets the menu's top row share the two-column
+    /// layout every data row already uses, instead of one prose line setting
+    /// the whole menu's width. The error and unknown forms have nothing worth
+    /// a second column and come back with it empty.
+    pub fn status_columns(&self) -> (String, String) {
+        if !self.device_ok || self.is_stale() || !self.reading.have_status {
+            return (self.status_line(), String::new());
+        }
+        let where_ = if self.reading.status.on_battery() {
+            "On battery"
+        } else {
+            "Online"
+        };
+        let detail = match (self.reading.charge, self.reading.runtime_min()) {
+            (Some(c), Some(m)) => format!("{c}%, {m} min"),
+            (Some(c), None) => format!("{c}%"),
+            _ => String::new(),
+        };
+        (where_.into(), detail)
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +449,25 @@ mod tests {
             have_status: true,
             ..Default::default()
         }
+    }
+
+    /// The menu's top row shares the two-column layout of the data rows, and
+    /// the forms with nothing to tabulate say so with an empty detail.
+    #[test]
+    fn the_status_splits_into_columns_when_there_are_columns() {
+        let snap = Snapshot {
+            reading: on_mains(97),
+            device_ok: true,
+            error: None,
+            stream_age_s: Some(1),
+            sweep_age_s: Some(1),
+        };
+        assert_eq!(snap.status_columns(), ("Online".into(), "97%, 43 min".into()));
+
+        let dead = Snapshot { device_ok: false, ..snap.clone() };
+        let (state, detail) = dead.status_columns();
+        assert!(state.starts_with("UPS not responding"), "{state}");
+        assert!(detail.is_empty(), "an error line grew a second column");
     }
 
     #[test]

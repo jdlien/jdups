@@ -565,15 +565,16 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         // absent outside the on-battery phase -- pending has its own countdown.
         let eta = match phase_of(action, &o) {
             Phase::OnBattery => state.shutdown_eta(&o, &cfg).map(|(secs, route)| {
+                // Capitalised: the tray renders this as its own menu row.
+                // The backstop's phrase carries no number on purpose -- the
+                // estimate next to it *is* that number, and restating it was
+                // what made the menu wide.
                 let why = match route {
                     jdups::policy::EtaRoute::Runtime => format!(
-                        "at {} remaining",
+                        "At {} of runtime remaining",
                         crate::journal::duration(u64::from(cfg.runtime_threshold_s))
                     ),
-                    jdups::policy::EtaRoute::Backstop => format!(
-                        "at the {} on-battery limit",
-                        crate::journal::duration(cfg.max_on_battery_s)
-                    ),
+                    jdups::policy::EtaRoute::Backstop => "At the on-battery time limit".to_string(),
                 };
                 (secs, why)
             }),

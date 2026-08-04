@@ -948,13 +948,23 @@ unsafe fn show_menu(app: *mut App, x: i32, y: i32) {
             };
             add_item(menu, ID_STATUS, &line, true);
         }
-        add_item(menu, ID_STATUS, &snap.status_line(), true);
+        // Two columns like every data row below, so one prose line does not
+        // set the whole menu's width.
+        let (state, detail) = snap.status_columns();
+        if detail.is_empty() {
+            add_item(menu, ID_STATUS, &state, true);
+        } else {
+            add_item(menu, ID_STATUS, &format!("{state}\t{detail}"), true);
+        }
         // What is about to happen to the machine, while it still is not:
         // during an outage, the agent's own estimate of when it will act. Gone
         // once the countdown starts -- the pending line above says the rest.
         if pending_seconds(app).is_none() {
             if let Some((secs, why)) = (*app).agent_eta.as_ref() {
-                add_item(menu, ID_STATUS, &eta_line((*app).agent_armed, *secs, why), true);
+                add_item(menu, ID_STATUS, &eta_line((*app).agent_armed, *secs), true);
+                // The clock behind the estimate, dim like the install date:
+                // reference material, not a live reading.
+                add_item(menu, ID_STATUS, why, false);
             }
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
@@ -1193,22 +1203,24 @@ unsafe fn open_as_text(path: &std::path::Path, elevated: bool) {
     };
 }
 
-/// The menu line under the status row during an outage.
+/// The menu line under the status row during an outage. Two columns, like the
+/// rest of the menu; the *why* renders as its own dim row, so it stopped
+/// living here.
 ///
 /// Rounded to minutes, and "~" earned three ways: the runtime reading jitters,
 /// the charge floor is not modelled and can fire sooner, and the settle window
-/// can defer the start. The prose after the comma is the agent's own, composed
-/// where the operative thresholds are known.
-fn eta_line(armed: bool, eta_s: u64, why: &str) -> String {
+/// can defer the start. "Would shut down" is the dry-run marker, same as the
+/// pending line and the journal.
+fn eta_line(armed: bool, eta_s: u64) -> String {
     let when = if eta_s < 90 {
         "in about a minute".to_string()
     } else {
         format!("in ~{} min", (eta_s + 30) / 60)
     };
     if armed {
-        format!("Shutdown {when}, {why}")
+        format!("Shutdown\t{when}")
     } else {
-        format!("Would shut down {when}, {why} (dry run)")
+        format!("Would shut down\t{when}")
     }
 }
 
@@ -1396,26 +1408,17 @@ mod tests {
     use jdups::decode::{PresentStatus, PAGE_BATTERY};
     use jdups::model::Reading;
 
-    /// The estimate reads as one sentence about the machine's near future, in
-    /// minutes because the seconds jitter, and it never claims precision it
-    /// does not have.
+    /// The estimate is a two-column row like the rest of the menu, in minutes
+    /// because the seconds jitter, never claiming precision it does not have.
+    /// The why lives on its own dim row and is not this function's problem.
     #[test]
-    fn the_eta_line_reads_like_a_sentence_and_rounds_to_minutes() {
-        assert_eq!(
-            eta_line(true, 1720, "at 5 min remaining"),
-            "Shutdown in ~29 min, at 5 min remaining"
-        );
-        assert_eq!(
-            eta_line(false, 1720, "at 5 min remaining"),
-            "Would shut down in ~29 min, at 5 min remaining (dry run)"
-        );
+    fn the_eta_line_is_two_columns_and_rounds_to_minutes() {
+        assert_eq!(eta_line(true, 1720), "Shutdown\tin ~29 min");
+        assert_eq!(eta_line(false, 1720), "Would shut down\tin ~29 min");
         // Under 90 seconds the number would be noise; the words carry it.
-        assert_eq!(
-            eta_line(true, 45, "at the 30 min on-battery limit"),
-            "Shutdown in about a minute, at the 30 min on-battery limit"
-        );
+        assert_eq!(eta_line(true, 45), "Shutdown\tin about a minute");
         // Rounds, never truncates: 150 s is closer to 3 min than 2.
-        assert!(eta_line(true, 150, "x").contains("~3 min"));
+        assert!(eta_line(true, 150).contains("~3 min"));
     }
 
     /// A writable config never prompts for elevation, and probing a missing
