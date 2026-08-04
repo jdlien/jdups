@@ -56,11 +56,26 @@ const RETRY_SHUTDOWN_S: u64 = 30;
 /// well inside the 30 s staleness default, so a quick reopen keeps the
 /// readings from ever counting as stale.
 const POLL_FAILURES_TO_REOPEN: u32 = 5;
+/// The pause between reopen attempts when reopening does not help, doubling
+/// to the cap. The unit can wedge so that opens succeed and every request
+/// fails -- seen for real at mains-return on 2026-08-03, fixed only by a
+/// physical replug -- and without this the loop burned a full enumeration and
+/// six log lines a minute, indefinitely, at a device that was not coming
+/// back. Capped low enough that recovery after a replug is never far away.
+const REOPEN_BACKOFF_MIN: Duration = Duration::from_secs(10);
+const REOPEN_BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// How often to look at the countdown registers while on mains. On battery
-/// the watch runs every pass -- the moment it exists to catch is a few
-/// hundred milliseconds wide -- but on mains those registers change only if
-/// something external arms the UPS, and reading three of them every poll was
-/// ninety IOCTLs a minute spent confirming that nothing had.
+/// the look runs at the poll cadence instead.
+///
+/// It used to run **every pass** on battery, to catch PowerChute arming the
+/// UPS late in a shutdown -- a moment a few hundred milliseconds wide. That
+/// hypothesis was settled on 2026-08-01 and PowerChute is gone; the only
+/// writer left is this agent's own transaction, which logs itself. What
+/// remains worth seeing -- the UPS decrementing a countdown during a real
+/// shutdown -- survives a 2 s look, and the change sheds two-thirds of the
+/// agent's on-battery read pressure. That matters since 2026-08-03, when the
+/// unit wedged its USB interface at mains-return with three of our readers
+/// plus Windows' battery driver all querying it through a transfer event.
 const COUNTDOWN_WATCH_MAINS_EVERY: Duration = Duration::from_secs(30);
 
 pub struct Options {
@@ -114,6 +129,11 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
     let mut device_ok = false;
     let mut reconciled = false;
     let mut poll_failures: u32 = 0;
+    // The wedged-device machinery: when the handle keeps dying, reopens are
+    // paced and the log hears about transitions, not attempts.
+    let mut reopen_after: Option<Instant> = None;
+    let mut reopen_backoff = REOPEN_BACKOFF_MIN;
+    let mut wedge_reported = false;
     // `None` means "due now". Never `Instant::now() - POLL_EVERY`: `Instant` on
     // Windows counts from boot, and subtracting more than the machine has been
     // up panics -- which is exactly the state a boot-started agent runs in.
@@ -165,7 +185,13 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         let mut numbers_fresh = false;
 
         // --- connect ------------------------------------------------------
-        if device.is_none() {
+        if device.is_none() && reopen_after.is_some_and(|t| Instant::now() < t) {
+            // Waiting out the reopen backoff. Everything below still runs --
+            // the latch, the backstop, the publishes -- just without a device;
+            // pace the pass the way the read timeout otherwise would.
+            stop.wait_for(Duration::from_millis(READ_TIMEOUT_MS as u64));
+        } else if device.is_none() {
+            reopen_after = None;
             match hid::open(opts.serial.as_deref()) {
                 Ok(d) => {
                     backoff = RETRY_MIN;
@@ -318,6 +344,11 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
             match dev.feature(report::PRESENT_STATUS) {
                 Ok(b) => {
                     poll_failures = 0;
+                    if wedge_reported {
+                        wedge_reported = false;
+                        reopen_backoff = REOPEN_BACKOFF_MIN;
+                        say(Level::Info, "the UPS is answering reads again");
+                    }
                     status = Some(dev.status_of(&b, false));
                     status_fresh = true;
                 }
@@ -360,11 +391,21 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         // --- a dead handle is a lost device ----------------------------------
         // A healthy device answers every status poll, so a run of failures
         // means the handle, not the mains. Reopen through the connect branch,
-        // which warns if the device is genuinely gone.
+        // which warns if the device is genuinely gone -- but on a backoff,
+        // and said once: a wedged unit is not coming back because we asked
+        // again sooner.
         if poll_failures >= POLL_FAILURES_TO_REOPEN {
             poll_failures = 0;
             device = None;
-            say(Level::Warn, "the UPS stopped answering reads; reopening");
+            if !wedge_reported {
+                wedge_reported = true;
+                say(
+                    Level::Warn,
+                    "the UPS stopped answering reads; reopening on a backoff. If this persists, replug its USB cable.",
+                );
+            }
+            reopen_after = Some(Instant::now() + reopen_backoff);
+            reopen_backoff = (reopen_backoff * 2).min(REOPEN_BACKOFF_MAX);
         }
 
         // --- resumes, from the service control handler ------------------------
@@ -594,14 +635,10 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
         );
 
         // --- watch the countdown registers ---------------------------------
-        // On battery this runs every pass rather than every poll. The moment
-        // worth catching is a few hundred milliseconds wide: whoever arms the
-        // UPS does it late in a shutdown sequence, and this process is being
-        // torn down by that same sequence. A 2 s cadence could miss the only
-        // event the watch exists for. On mains the registers change only if
-        // something external arms the UPS, so a slow look suffices there.
-        let look = o.on_battery
-            || last_countdown_look.is_none_or(|t| t.elapsed() >= COUNTDOWN_WATCH_MAINS_EVERY);
+        // Poll cadence on battery, slow on mains. See the constant for why the
+        // old every-pass battery watch retired with PowerChute.
+        let every = if o.on_battery { POLL_EVERY } else { COUNTDOWN_WATCH_MAINS_EVERY };
+        let look = last_countdown_look.is_none_or(|t| t.elapsed() >= every);
         if look {
             if let Some(dev) = device.as_ref() {
                 last_countdown_look = Some(Instant::now());
