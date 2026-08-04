@@ -174,6 +174,22 @@ fn numbers(o: &Observation, stale: bool) -> String {
     s
 }
 
+/// Seconds, exactly: "4 min 40 s", "5 min", "45 s". For numbers where rounding
+/// would lie about a margin -- a 280 s threshold shown as "5 min" overstates
+/// the room by twenty seconds, in a sentence about when the machine dies. The
+/// journal's own durations stay rounded because they describe elapsed time.
+pub(crate) fn duration_exact(s: u64) -> String {
+    if s < 60 {
+        return format!("{s} s");
+    }
+    let (m, r) = (s / 60, s % 60);
+    if r == 0 {
+        format!("{m} min")
+    } else {
+        format!("{m} min {r} s")
+    }
+}
+
 /// Seconds as something a human reads without arithmetic.
 pub(crate) fn duration(s: u64) -> String {
     if s < 90 {
@@ -379,5 +395,17 @@ mod tests {
         assert_eq!(duration(1800), "30 min");
         assert_eq!(duration(7200), "2 h 0 min");
         assert_eq!(duration(9000), "2 h 30 min");
+    }
+
+    /// A threshold is a margin, and rounding a margin up lies in the
+    /// dangerous direction: 280 s shown as "5 min" claims twenty seconds that
+    /// do not exist.
+    #[test]
+    fn exact_durations_never_round_a_margin_away() {
+        assert_eq!(duration_exact(280), "4 min 40 s");
+        assert_eq!(duration_exact(300), "5 min");
+        assert_eq!(duration_exact(45), "45 s");
+        assert_eq!(duration_exact(60), "1 min");
+        assert_eq!(duration_exact(3661), "61 min 1 s");
     }
 }

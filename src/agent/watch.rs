@@ -612,9 +612,11 @@ pub fn run(opts: Options, stop: Arc<Stop>) -> i32 {
                 // estimate next to it *is* that number, and restating it was
                 // what made the menu wide.
                 let why = match route {
+                    // Exact, not rounded: this is a margin, and "At 5 min"
+                    // for a 280 s threshold overstated it by twenty seconds.
                     jdups::policy::EtaRoute::Runtime => format!(
                         "At {} of runtime remaining",
-                        crate::journal::duration(u64::from(cfg.runtime_threshold_s))
+                        crate::journal::duration_exact(u64::from(cfg.runtime_threshold_s))
                     ),
                     jdups::policy::EtaRoute::Backstop => "At the on-battery time limit".to_string(),
                 };
