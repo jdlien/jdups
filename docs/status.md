@@ -70,6 +70,18 @@ Not asserted, measured. The plug-pull capture is `docs/plug-pull.txt`.
 - The charge estimate is a *model*, not a measurement: it drops ~20 points
   within seconds of a transfer and recovers over hours, while battery voltage
   recovers in seconds. This shapes `policy.rs`'s settle window.
+- **The unit can wedge its USB interface outright** (2026-08-03, at
+  mains-return after its deepest discharge, with the inbox battery driver
+  newly sharing the bus): it still enumerates and opens succeed, but every
+  request fails from every process, string descriptors included -- the serial
+  reads as `(none)`. Reopening does not help; a physical replug does. Classic
+  APC "COMMLOST" behaviour, decades older than this project. What jdups does
+  about it: reopens back off to five minutes with one log line per transition
+  naming the replug remedy, on-battery read pressure was cut by two-thirds,
+  and the backstop consults `GetSystemPowerStatus` -- the battery driver's own
+  independent read of the same hardware -- before firing through device
+  silence, because the wedge plus an armed backstop nearly shut a machine
+  down on healthy mains.
 
 ## Not verified
 
